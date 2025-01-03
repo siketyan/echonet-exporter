@@ -146,7 +146,7 @@ pub const Client = struct {
             conn: *Connection,
 
             fn readValue(this: @This()) ![]const u8 {
-                var it = mem.splitBackwards(u8, try this.conn.readLine(), ":");
+                var it = mem.splitBackwardsSequence(u8, try this.conn.readLine(), ":");
                 return it.first();
             }
 
@@ -252,7 +252,7 @@ pub const Client = struct {
     pub fn readEvent(self: *Client) !Event {
         debug.assert(mem.eql(u8, try self.readWord(), "EVENT"));
 
-        var it = mem.split(u8, try self.conn.readLine(), " ");
+        var it = mem.splitSequence(u8, try self.conn.readLine(), " ");
 
         const num = try std.fmt.parseInt(u8, it.next() orelse unreachable, 16);
         const sender = it.next() orelse unreachable;

@@ -59,7 +59,7 @@ pub const Measure = struct {
         self.epc = @intCast(try map.get("epc").?.asInt());
 
         const type_raw = try map.get("type").?.asString();
-        self.type = inline for (@typeInfo(Type).Enum.fields) |f| {
+        self.type = inline for (@typeInfo(Type).@"enum".fields) |f| {
             if (mem.eql(u8, f.name, type_raw)) {
                 break @enumFromInt( f.value);
             }

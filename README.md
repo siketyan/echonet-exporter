@@ -5,7 +5,7 @@
 
 ## Requirements
 
-- Zig 0.13.0
+- Zig 0.14.0-dev (2025-01-03)
 - Wi-SUN Receiver with BP35C0 chip
 - B Route credentials
 
