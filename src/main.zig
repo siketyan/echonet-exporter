@@ -25,7 +25,7 @@ pub fn main() !void {
     // defer std.debug.assert(gpa.deinit() == .ok);
 
     const conf = try config.Config.loadYamlFileAlloc("config.yaml", allocator);
-    defer conf.deinit(allocator);
+    defer conf.deinit();
 
     // var pcap_fd = try fs.cwd().createFile("test.pcap", .{});
     // defer pcap_fd.close();
@@ -33,15 +33,15 @@ pub fn main() !void {
     // var writer = pcapfile.pcap.initWriter(.{ .network = .IPV6 }, pcap_fd.writer());
     // try writer.writeFileHeader();
 
-    var client = Client.init(try Connection.init(conf.device), allocator);
+    var client = Client.init(try Connection.init(conf.device.asSlice()), allocator);
     defer client.close();
 
     try client.skreset();
     try client.sksreg("SFE", "0"); // Disable echo-back
 
     // Set credentials
-    try client.sksetpwd(conf.credentials.pwd);
-    try client.sksetrbid(conf.credentials.rbid);
+    try client.sksetpwd(conf.credentials.pwd.asSlice());
+    try client.sksetrbid(conf.credentials.rbid.asSlice());
 
     try client.skscan(2, 0xFFFFFFFF, 5, 0);
 
@@ -112,16 +112,16 @@ pub fn main() !void {
                 if (e.dest.getPort() == 3610) {
                     var stream = io.fixedBufferStream(e.data);
                     try resp.readAlloc(stream.reader().any(), state.allocator);
-                    if (resp.getTID() == req.getTID()) {
-                        break;
+                    defer resp.deinit();
+
+                    if (resp.getTID() != req.getTID()) {
+                        log.info("Response from another transaction, ignoring: {any}", .{resp});
+                        continue;
                     }
 
-                    log.info("Response from another transaction, ignoring: {any}", .{resp});
-                    resp.deinit(state.allocator);
+                    return resp.clone();
                 }
-            } else unreachable;
-
-            return resp;
+            }
         }
     };
 
@@ -185,10 +185,10 @@ pub fn main() !void {
             defer response.end() catch {};
             defer log.info("200 OK", .{});
 
-            const props = try allocator.alloc(echonet.Property, conf.measures.len);
-            defer allocator.free(props);
-            for (0..conf.measures.len) |i| {
-                props[i] = .{ .epc = conf.measures[i].epc };
+            var props = try echonet.PropertyList.init(allocator, conf.measures.items.len);
+            defer props.deinit();
+            for (conf.measures.items) |measure| {
+                try props.list.append(.{ .epc = measure.epc, .edt = null });
             }
 
             const tid = txm.begin();
@@ -209,25 +209,27 @@ pub fn main() !void {
             };
 
             const resp = try state.handle(req);
-            defer resp.deinit(allocator);
+            defer resp.deinit();
 
-            for (resp.format1.edata.props) |prop| {
-                const measure: config.Measure = for (conf.measures) |m| {
+            for (resp.format1.edata.props.asSlice()) |prop| {
+                const measure: config.Measure = for (conf.measures.items) |m| {
                     if (m.epc == prop.epc) {
                         break m;
                     }
                 } else continue;
 
+                const edt = prop.edt orelse unreachable;
                 const value = switch (measure.type) {
-                    .signed_long => mem.readInt(i32, prop.edt[0..4], .big),
+                    .signed_long => mem.readInt(i32, edt.items[0..4], .big),
                 };
 
+                const name = measure.name.asSlice();
                 if (measure.help) |help| {
-                    try std.fmt.format(response.writer(), "# HELP {s} {s}\n", .{ measure.name, help });
+                    try std.fmt.format(response.writer(), "# HELP {s} {s}\n", .{ name, help.asSlice() });
                 }
 
-                try std.fmt.format(response.writer(), "# TYPE {s} gauge\n", .{measure.name});
-                try std.fmt.format(response.writer(), "{s} {d}\n", .{ measure.name, value });
+                try std.fmt.format(response.writer(), "# TYPE {s} gauge\n", .{name});
+                try std.fmt.format(response.writer(), "{s} {d}\n", .{ name, value });
             }
         }
     }

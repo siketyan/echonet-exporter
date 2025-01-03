@@ -32,29 +32,91 @@ pub const Property = struct {
     /// ECHONET Lite Property (EPC)
     epc: u8,
     /// Property value data (EDT)
-    edt: []const u8 = &.{},
+    edt: ?std.ArrayList(u8) = null,
 
-    pub fn deinit(self: Property, alloc: mem.Allocator) void {
-        alloc.free(self.edt);
+    pub fn deinit(self: Property) void {
+        if (self.edt) |edt| edt.deinit();
     }
 
-    pub fn readAlloc(self: *Property, reader: io.AnyReader, alloc: mem.Allocator) !void {
+    pub fn clone(self: Property) !Property {
+        var cloned = self;
+        if (self.edt) |edt| {
+            cloned.edt = try edt.clone();
+        }
+
+        return cloned;
+    }
+
+    pub fn readAlloc(self: *Property, reader: io.AnyReader, allocator: mem.Allocator) !void {
         self.epc = try reader.readByte();
 
         const pdc = try reader.readByte();
-        const edt = try alloc.alloc(u8, pdc);
-        debug.assert(try reader.readAll(edt) == pdc);
-        self.edt = edt;
+        if (pdc > 0) {
+            const edt = try allocator.alloc(u8, pdc);
+            debug.assert(try reader.readAll(edt) == pdc);
+            self.edt = std.ArrayList(u8).fromOwnedSlice(allocator, edt);
+        } else {
+            self.edt = null;
+        }
     }
 
     pub fn write(self: Property, writer: io.AnyWriter) !void {
         try writer.writeByte(self.epc);
-        try writer.writeByte(@intCast(self.edt.len)); // PDC
-        try writer.writeAll(self.edt);
+        if (self.edt) |edt| {
+            try writer.writeByte(@intCast(edt.items.len)); // PDC
+            try writer.writeAll(edt.items);
+        } else {
+            try writer.writeByte(0); // PDC
+        }
     }
 
     pub fn len(self: Property) usize {
-        return 1 + 1 + self.edt.len; // EPC + PDC + EDT
+        return 1 + 1 + if (self.edt) |edt| edt.items.len else 0; // EPC + PDC + EDT
+    }
+};
+
+pub const PropertyList = struct {
+    const Self = @This();
+    const List = std.ArrayList(Property);
+
+    list: List,
+
+    pub fn init(allocator: mem.Allocator, capacity: usize) mem.Allocator.Error!Self {
+        return Self{ .list = try List.initCapacity(allocator, capacity) };
+    }
+
+    pub fn deinit(self: Self) void {
+        for (self.asSlice()) |i| i.deinit();
+        self.list.deinit();
+    }
+
+    pub fn clone(self: Self) !Self {
+        var cloned = self;
+        cloned.list = try self.list.clone();
+        for (cloned.list.items) |*p| {
+            p.* = try p.clone();
+        }
+
+        return cloned;
+    }
+
+    pub fn fromSlice(allocator: mem.Allocator, slice: []const Property) !Self {
+        var list = try List.initCapacity(allocator, slice.len);
+        list.appendSliceAssumeCapacity(slice);
+
+        return Self{ .list = list };
+    }
+
+    pub fn fromOwnedSlice(allocator: mem.Allocator, slice: []Property) Self {
+        return Self{ .list = List.fromOwnedSlice(allocator, slice) };
+    }
+
+    pub inline fn asSlice(self: Self) []const Property {
+        return self.list.items;
+    }
+
+    pub inline fn len(self: Self) usize {
+        return self.asSlice().len;
     }
 };
 
@@ -66,44 +128,47 @@ pub const EDATA = struct {
     /// ECHONET Lite service (ESV)
     esv: u8,
     /// Processing Target Properties
-    props: []const Property,
+    props: PropertyList,
 
-    pub fn deinit(self: EDATA, alloc: mem.Allocator) void {
-        for (self.props) |p| {
-            p.deinit(alloc);
-        }
-
-        alloc.free(self.props);
+    pub fn deinit(self: EDATA) void {
+        self.props.deinit();
     }
 
-    pub fn readAlloc(self: *EDATA, reader: io.AnyReader, alloc: mem.Allocator) !void {
+    pub fn clone(self: EDATA) !EDATA {
+        var cloned = self;
+        cloned.props = try self.props.clone();
+
+        return cloned;
+    }
+
+    pub fn readAlloc(self: *EDATA, reader: io.AnyReader, allocator: mem.Allocator) !void {
         try self.seoj.read(reader);
         try self.deoj.read(reader);
 
         self.esv = try reader.readByte();
 
         const opc = try reader.readByte();
-        const props = try alloc.alloc(Property, opc);
+        const props = try allocator.alloc(Property, opc);
         for (0..opc) |i| {
-            try props[i].readAlloc(reader, alloc);
+            try props[i].readAlloc(reader, allocator);
         }
-        self.props = props;
+        self.props = PropertyList.fromOwnedSlice(allocator, props);
     }
 
     pub fn write(self: EDATA, writer: io.AnyWriter) !void {
         try self.seoj.write(writer);
         try self.deoj.write(writer);
         try writer.writeByte(self.esv);
-        try writer.writeByte(@intCast(self.props.len)); // OPC
+        try writer.writeByte(@intCast(self.props.len())); // OPC
 
-        for (self.props) |prop| {
+        for (self.props.asSlice()) |prop| {
             try prop.write(writer);
         }
     }
 
     pub fn len(self: EDATA) usize {
         var sum: usize = EOJ.len() + EOJ.len() + 1 + 1; // SEOJ + DEOJ + ESV + OPC
-        for (self.props) |prop| {
+        for (self.props.asSlice()) |prop| {
             sum += prop.len();
         }
 
@@ -129,13 +194,21 @@ pub const Frame = union(enum) {
         edata: []u8,
     };
 
-    pub fn deinit(self: Frame, alloc: mem.Allocator) void {
+    pub fn deinit(self: Frame) void {
         switch (self) {
-            .format1 => |f| {
-                f.edata.deinit(alloc);
-            },
+            .format1 => |f| f.edata.deinit(),
             else => {},
         }
+    }
+
+    pub fn clone(self: Frame) !Frame {
+        var cloned = self;
+        switch (cloned) {
+            .format1 => |*f| f.edata = try f.edata.clone(),
+            else => {},
+        }
+
+        return cloned;
     }
 
     pub fn getTID(self: Frame) u16 {
@@ -176,7 +249,7 @@ pub const Frame = union(enum) {
                 try writer.writeByte(0x82); // EHD2
                 try writer.writeInt(u16, f.tid, .big);
                 try writer.writeAll(f.edata);
-            }
+            },
         }
     }
 
@@ -204,15 +277,15 @@ pub const Frame = union(enum) {
 };
 
 test "reading from bytes - format 1" {
-    const allocator = std.testing.allocator;
+    const t = std.testing;
 
     var stream = io.fixedBufferStream("\x10\x81\x12\x34\x05\xFF\x01\x02\x88\x01\x62\x02\xE7\x00\xE8\x00");
 
     var frame: Frame = undefined;
-    try frame.readAlloc(stream.reader().any(), allocator);
-    defer frame.deinit(allocator);
+    try frame.readAlloc(stream.reader().any(), t.allocator);
+    defer frame.deinit();
 
-    const expected = Frame {
+    const expected = Frame{
         .format1 = .{
             .tid = 0x1234,
             .edata = .{
@@ -227,21 +300,22 @@ test "reading from bytes - format 1" {
                     .instance_code = 0x01,
                 },
                 .esv = 0x62, // Get
-                .props = &.{
+                .props = try PropertyList.fromSlice(t.allocator, &.{
                     .{ .epc = 0xE7 },
                     .{ .epc = 0xE8 },
-                },
+                }),
             },
         },
     };
+    defer expected.deinit();
 
-    try std.testing.expectEqualDeep(expected, frame);
+    try t.expectEqualDeep(expected, frame);
 }
 
 test "writing to bytes - format 1" {
-    const allocator = std.testing.allocator;
+    const t = std.testing;
 
-    const frame = Frame {
+    const frame = Frame{
         .format1 = .{
             .tid = 0x1234,
             .edata = .{
@@ -256,16 +330,17 @@ test "writing to bytes - format 1" {
                     .instance_code = 0x01,
                 },
                 .esv = 0x62, // Get
-                .props = &.{
+                .props = try PropertyList.fromSlice(t.allocator, &.{
                     .{ .epc = 0xE7 },
                     .{ .epc = 0xE8 },
-                },
+                }),
             },
         },
     };
+    defer frame.deinit();
 
-    const bytes = try frame.toBytesAlloc(allocator);
-    defer allocator.free(bytes);
+    const bytes = try frame.toBytesAlloc(t.allocator);
+    defer t.allocator.free(bytes);
 
-    try std.testing.expectEqualStrings("\x10\x81\x12\x34\x05\xFF\x01\x02\x88\x01\x62\x02\xE7\x00\xE8\x00", bytes);
+    try t.expectEqualStrings("\x10\x81\x12\x34\x05\xFF\x01\x02\x88\x01\x62\x02\xE7\x00\xE8\x00", bytes);
 }
