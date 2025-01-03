@@ -15,8 +15,8 @@
             .hash = "12205fcc7d33b6b10007df3551c0307406c6a2646f5d6e8535383d5bf01ef7fbc7ca",
         },
         .@"zig-yaml" = .{
-            .url = "https://github.com/kubkon/zig-yaml/archive/main.tar.gz",
-            .hash = "12206cc047b006b3a1f657d9bcb9b63842dd38007644f36ec92536e876d7ab8c4762",
+            .url = "https://github.com/siketyan/zig-yaml/archive/main.tar.gz",
+            .hash = "1220fbd48b78d55097fbdee3308759dfa7ed9fdd6d3995b7fa04d4a9e790bf7d8cf1",
         },
     },
 }
