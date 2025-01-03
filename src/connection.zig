@@ -83,4 +83,31 @@ pub const Connection = struct {
         try std.fmt.format(self.fd.writer(), fmt, args);
         try self.fd.writer().writeAll("\r\n");
     }
+
+    const PollError = std.posix.PollError || error{
+        BrokenPipe,
+        Other,
+    };
+
+    pub fn poll(self: *Connection, timeout: i32) PollError!bool {
+        // TODO: Windows support
+        const posix = std.posix;
+
+        var fds: [1]posix.pollfd = .{.{
+            .fd = self.fd.handle,
+            .events = posix.POLL.IN,
+            .revents = undefined,
+        }};
+
+        const wait = try posix.poll(&fds, timeout);
+        if (wait != 1) {
+            return false;
+        }
+
+        return switch (fds[0].revents) {
+            posix.POLL.IN => true,
+            posix.POLL.HUP => error.BrokenPipe,
+            else => error.Other,
+        };
+    }
 };

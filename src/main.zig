@@ -84,7 +84,7 @@ pub fn main() !void {
 
         const Self = @This();
 
-        fn handle(state: *const Self, req: echonet.Frame) !echonet.Frame {
+        fn handle(state: *const Self, req: echonet.Frame) !?echonet.Frame {
             const buf = try req.toBytesAlloc(state.allocator);
             defer state.allocator.free(buf);
 
@@ -92,6 +92,11 @@ pub fn main() !void {
 
             var resp: echonet.Frame = undefined;
             while (true) {
+                // Wait for events
+                if (!try state.client.conn.poll(5000)) {
+                    return null;
+                }
+
                 const event = try state.client.readEventLike();
                 const e = switch (event) {
                     .erxudp => |e| e,
@@ -119,7 +124,7 @@ pub fn main() !void {
                         continue;
                     }
 
-                    return resp.clone();
+                    return try resp.clone();
                 }
             }
         }
@@ -174,17 +179,6 @@ pub fn main() !void {
                 continue;
             }
 
-            var response = request.respondStreaming(.{
-                .send_buffer = &tx_buf,
-                .respond_options = .{
-                    .extra_headers = &.{
-                        .{ .name = "Content-Type", .value = "text/plain; version=0.0.4" },
-                    },
-                },
-            });
-            defer response.end() catch {};
-            defer log.info("200 OK", .{});
-
             var props = try echonet.PropertyList.init(allocator, conf.measures.items.len);
             defer props.deinit();
             for (conf.measures.items) |measure| {
@@ -208,8 +202,24 @@ pub fn main() !void {
                 },
             };
 
-            const resp = try state.handle(req);
+            const resp = try state.handle(req) orelse {
+                // TODO: Retry
+                try request.respond(&.{}, .{ .status = .gateway_timeout });
+                log.info("504 Gateway Timeout", .{});
+                continue;
+            };
             defer resp.deinit();
+
+            var response = request.respondStreaming(.{
+                .send_buffer = &tx_buf,
+                .respond_options = .{
+                    .extra_headers = &.{
+                        .{ .name = "Content-Type", .value = "text/plain; version=0.0.4" },
+                    },
+                },
+            });
+            defer response.end() catch {};
+            defer log.info("200 OK", .{});
 
             for (resp.format1.edata.props.asSlice()) |prop| {
                 const measure: config.Measure = for (conf.measures.items) |m| {
