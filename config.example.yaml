@@ -1,0 +1,13 @@
+device: /dev/ttyUSB0
+credentials:
+  rbid: '<Route B Authentication ID>'
+  pwd: '<Route B Authentication Password>'
+target:
+  class_group_code: 0x02  # 住宅・設備関連機器クラスグループ
+  class_code: 0x88        # 低圧スマート電力量メータクラス
+  instance_code: 0x01
+measures:
+  - name: measured_instantaneous_electric_power
+    help: 瞬時電力計測値
+    epc: 0xE7
+    type: signed_long

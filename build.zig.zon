@@ -1,0 +1,22 @@
+.{
+    .name = "echonet-exporter",
+    .version = "0.0.1",
+    .minimum_zig_version = "0.13.0",
+
+    .paths = .{""},
+
+    .dependencies = .{
+        .serial = .{
+            .url = "https://github.com/ZigEmbeddedGroup/serial/archive/master.tar.gz",
+            .hash = "12204ed648b46a5aeeb93363e8a36c554c4bdb9cb27b2ed29066f5a7e2a1636ce7f9",
+        },
+        .@"zig-pcapfile" = .{
+            .url = "https://github.com/siketyan/zig-pcapfile/archive/main.tar.gz",
+            .hash = "12205fcc7d33b6b10007df3551c0307406c6a2646f5d6e8535383d5bf01ef7fbc7ca",
+        },
+        .@"zig-yaml" = .{
+            .url = "https://github.com/kubkon/zig-yaml/archive/main.tar.gz",
+            .hash = "12206cc047b006b3a1f657d9bcb9b63842dd38007644f36ec92536e876d7ab8c4762",
+        },
+    },
+}
