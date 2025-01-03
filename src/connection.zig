@@ -9,9 +9,6 @@ const serial = @import("serial");
 
 const peek_stream = @import("./peek_stream.zig");
 
-const VTIME = 5;
-const VMIN = 6;
-
 pub const Connection = struct {
     buf: [1024]u8,
     fd: fs.File,
@@ -23,13 +20,6 @@ pub const Connection = struct {
         try serial.configureSerialPort(fd, serial.SerialConfig{
             .baud_rate = 115_200,
         });
-
-        var settings = try std.posix.tcgetattr(fd.handle);
-
-        settings.cc[VTIME] = 100;
-        settings.cc[VMIN] = 0;
-
-        try std.posix.tcsetattr(fd.handle, .NOW, settings);
 
         return Connection {
             .buf = undefined,
