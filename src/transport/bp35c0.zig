@@ -505,6 +505,8 @@ pub fn BP35C0Raw(comptime Port: type) type {
             const side = try self.readUnsignedHex(u8);
             const param = if (num == 0x21 or num == 0x45) try self.readUnsignedHex(u8) else null;
 
+            log.debug("< EVENT {X} {s} {X} {?X}", .{num, sender, side, param});
+
             return .{
                 .num = num,
                 .sender = (try std.net.Ip6Address.parse(sender, 0)).sa.addr,
