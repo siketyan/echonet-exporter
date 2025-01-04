@@ -25,6 +25,9 @@ const Server = @import("./server.zig").Server(Controller(BP35C0));
 
 pub const std_options: std.Options = .{
     .log_level = .info,
+    .log_scope_levels = &.{
+        .{ .scope = .bp35c0, .level = .debug },
+    },
 };
 
 pub fn main() !void {
