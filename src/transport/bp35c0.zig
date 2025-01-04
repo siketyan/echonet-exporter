@@ -272,10 +272,12 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
                 if (buf[0] == 'E') {
                     try self.port.putBack(&buf);
-                    const event = try self.waitEvent();
-                    try self.event_queue.writeItem(event);
 
+                    const event = try self.waitNewEvent();
+                    try self.event_queue.writeItem(event);
                     log.debug("Postponed an event: {}", .{event});
+
+                    continue;
                 }
 
                 log.debug("Received an unexpected response. Did you turned off echo-back?: {s}", .{&buf});
@@ -527,14 +529,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
             };
         }
 
-        pub fn waitEvent(self: *Self) !Event {
-            // Consume the event queue first.
-            if (self.event_queue.readItem()) |event| {
-                log.debug("Consumed a postponed event: {}", .{event});
-
-                return event;
-            }
-
+        pub fn waitNewEvent(self: *Self) !Event {
             const head = try self.readWord();
             defer self.allocator.free(head);
             try self.port.putBack(" ");
@@ -553,6 +548,17 @@ pub fn BP35C0Raw(comptime Port: type) type {
             }
 
             debug.panic("Unsupported event: {s}", .{head});
+        }
+
+        pub fn waitEvent(self: *Self) !Event {
+            // Consume the event queue first.
+            if (self.event_queue.readItem()) |event| {
+                log.debug("Consumed a postponed event: {}", .{event});
+
+                return event;
+            }
+
+            return try waitNewEvent(self);
         }
 
         pub fn pollEvent(self: *Self, timeout: i32) !?Event {
