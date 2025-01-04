@@ -609,9 +609,9 @@ pub fn BP35C0(comptime Port: type) type {
                     .event => |e| switch (e.num) {
                         0x20 => break,
                         0x22 => return error.CoordinatorNotFound,
-                        else => {},
+                        else => log.debug("Ignored an event: {}", .{e}),
                     },
-                    else => {},
+                    else => log.debug("Ignored an event: {}", .{event}),
                 }
             }
 
@@ -624,9 +624,9 @@ pub fn BP35C0(comptime Port: type) type {
                 switch (event) {
                     .event => |e| switch (e.num) {
                         0x21 => break,
-                        else => {},
+                        else => log.debug("Ignored an event: {}", .{e}),
                     },
-                    else => {},
+                    else => log.debug("Ignored an event: {}", .{event}),
                 }
             }
 
@@ -649,9 +649,9 @@ pub fn BP35C0(comptime Port: type) type {
                     .event => |e| switch (e.num) {
                         0x24 => return error.ConnectionFailed,
                         0x25 => break,
-                        else => {},
+                        else => log.debug("Ignored an event: {}", .{e}),
                     },
-                    else => {},
+                    else => log.debug("Ignored an event: {}", .{event}),
                 }
             }
 
@@ -663,7 +663,10 @@ pub fn BP35C0(comptime Port: type) type {
                 const event = try self.raw.pollEvent(timeout) orelse return error.TimedOut;
                 const erxudp: Event.ERXUDP = switch (event) {
                     .erxudp => |e| e,
-                    else => continue,
+                    else => {
+                        log.debug("Ignored an event: {}", .{event});
+                        continue;
+                    },
                 };
                 defer erxudp.deinit();
 
