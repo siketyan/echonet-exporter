@@ -163,14 +163,17 @@ fn fmtIp6Addr(ip_addr: [16]u8) std.fmt.Formatter(formatIp6Addr) {
 pub fn BP35C0Raw(comptime Port: type) type {
     return struct {
         const Self = @This();
+        const EventQueue = std.fifo.LinearFifo(Event, .Dynamic);
 
         port: *Port,
         allocator: mem.Allocator,
+        event_queue: EventQueue,
 
         fn initUnsafe(port: *Port, allocator: mem.Allocator) Self {
             return Self{
                 .port = port,
                 .allocator = allocator,
+                .event_queue = EventQueue.init(allocator),
             };
         }
 
@@ -264,6 +267,14 @@ pub fn BP35C0Raw(comptime Port: type) type {
                     }
 
                     debug.panic("Unexpected error code {s}", .{&buf});
+                }
+
+                if (buf[0] == 'E') {
+                    try self.port.putBack(&buf);
+                    const event = try self.waitEvent();
+                    try self.event_queue.writeItem(event);
+
+                    log.debug("Postponed an event: {}", .{event});
                 }
 
                 log.debug("Received an unexpected response. Did you turned off echo-back?: {s}", .{&buf});
@@ -516,6 +527,13 @@ pub fn BP35C0Raw(comptime Port: type) type {
         }
 
         pub fn waitEvent(self: *Self) !Event {
+            // Consume the event queue first.
+            if (self.event_queue.readItem()) |event| {
+                log.debug("Consumed a postponed event: {}", .{event});
+
+                return event;
+            }
+
             const head = try self.readWord();
             defer self.allocator.free(head);
             try self.port.putBack(" ");
