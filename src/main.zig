@@ -8,14 +8,15 @@ const net = std.net;
 
 const pcapfile = @import("pcapfile");
 
+const config = @import("./config.zig");
+const echonet = @import("./echonet.zig");
+
 const transport = @import("./transport.zig");
 const SerialPort = transport.SerialPort;
 const BP35C0 = transport.BP35C0(SerialPort);
 
 const TransactionManager = @import("./transaction.zig").TransactionManager;
-
-const config = @import("./config.zig");
-const echonet = @import("./echonet.zig");
+const Controller = @import("./controller.zig").Controller;
 
 // const packet = @import("./packet.zig");
 // const Ip6Packet = packet.Ip6Packet;
@@ -49,64 +50,10 @@ pub fn main() !void {
     try bp35c0.connect();
 
     var txm = TransactionManager.init();
-
-    const State = struct {
-        allocator: mem.Allocator,
-        transport: *BP35C0,
-        // writer: *@TypeOf(writer),
-        deoj: echonet.EOJ,
-
-        const Self = @This();
-
-        fn handle(state: *const Self, req: echonet.Frame) !?echonet.Frame {
-            const buf = try req.toBytesAlloc(state.allocator);
-            defer state.allocator.free(buf);
-
-            try state.transport.send(buf);
-
-            var resp: echonet.Frame = undefined;
-            while (true) {
-                const data = state.transport.recv(5000) catch |err| {
-                    switch (err) {
-                        error.TimedOut => return null,
-                        else => return err,
-                    }
-                };
-
-                // const udp = UdpPacket.init(e.sender, e.dest, e.data);
-                // const ip6 = Ip6Packet{
-                //     .next_header = 17, // UDP
-                //     .hop_limit = 64,
-                //     .source_addr = e.sender,
-                //     .dest_addr = e.dest,
-                //     .payload = try udp.toBytesAlloc(state.allocator),
-                // };
-                //
-                // try state.writer.writeRecord(.{}, try ip6.toBytesAlloc(state.allocator));
-
-                var stream = io.fixedBufferStream(data);
-                try resp.readAlloc(stream.reader().any(), state.allocator);
-                defer resp.deinit();
-
-                if (resp.getTID() != req.getTID()) {
-                    log.info("Response from another transaction, ignoring: {any}", .{resp});
-                    continue;
-                }
-
-                return try resp.clone();
-            }
-        }
-    };
-
-    const state = State{
+    const controller = Controller(BP35C0){
         .allocator = allocator,
         .transport = &bp35c0,
         // .writer = &writer,
-        .deoj = .{
-            .class_group_code = conf.target.class_group_code,
-            .class_code = conf.target.class_code,
-            .instance_code = conf.target.instance_code,
-        },
     };
 
     const addr = try net.Address.parseIp4("0.0.0.0", 9100);
@@ -162,14 +109,18 @@ pub fn main() !void {
                             .class_code = 0xFF,
                             .instance_code = 0x01,
                         },
-                        .deoj = state.deoj,
+                        .deoj = .{
+                            .class_group_code = conf.target.class_group_code,
+                            .class_code = conf.target.class_code,
+                            .instance_code = conf.target.instance_code,
+                        },
                         .esv = 0x62, // Get
                         .props = props,
                     },
                 },
             };
 
-            const resp = try state.handle(req) orelse {
+            const resp = try controller.handle(req) orelse {
                 // TODO: Retry
                 try request.respond(&.{}, .{ .status = .gateway_timeout });
                 log.info("504 Gateway Timeout", .{});
