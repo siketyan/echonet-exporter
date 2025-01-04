@@ -87,6 +87,7 @@ pub const Measure = struct {
 };
 
 pub const Config = struct {
+    address: std.net.Address,
     device: String,
     credentials: Credentials,
     target: Target,
@@ -101,6 +102,12 @@ pub const Config = struct {
 
     pub fn parseYamlAlloc(self: *Config, value: yaml.Value, allocator: mem.Allocator) !void {
         const map = try value.asMap();
+
+        var addr = mem.splitSequence(u8, try map.get("address").?.asString(), ":");
+        self.address = try std.net.Address.parseIp(
+            addr.next().?,
+            try std.fmt.parseUnsigned(u16, addr.next().?, 10),
+        );
 
         self.device = try String.fromSlice(allocator, try map.get("device").?.asString());
         try self.credentials.parseYamlAlloc(map.get("credentials").?, allocator);
@@ -139,6 +146,7 @@ test "load config" {
     const t = std.testing;
 
     const config =
+        \\address: 0.0.0.0:9100
         \\device: /dev/ttyUSB0
         \\credentials:
         \\  rbid: '0123456789ABCDEF'
@@ -158,6 +166,7 @@ test "load config" {
     defer actual.deinit();
 
     const expected = Config{
+        .address = try std.net.Address.parseIp("0.0.0.0", 9100),
         .device = try String.fromSlice(t.allocator, "/dev/ttyUSB0"),
         .credentials = .{
             .rbid = try String.fromSlice(t.allocator, "0123456789ABCDEF"),
@@ -181,5 +190,9 @@ test "load config" {
     };
     defer expected.deinit();
 
-    try t.expectEqualDeep(expected, actual);
+    try t.expect(actual.address.eql(expected.address));
+    try t.expectEqualDeep(expected.device, actual.device);
+    try t.expectEqualDeep(expected.credentials, actual.credentials);
+    try t.expectEqualDeep(expected.target, actual.target);
+    try t.expectEqualDeep(expected.measures, actual.measures);
 }

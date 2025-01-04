@@ -17,7 +17,6 @@ pub fn Server(comptime Controller: type) type {
         const Self = @This();
 
         allocator: mem.Allocator,
-        addr: net.Address,
         conf: config.Config,
         txm: *TransactionManager,
         controller: *const Controller,
@@ -26,14 +25,12 @@ pub fn Server(comptime Controller: type) type {
 
         pub fn init(
             allocator: mem.Allocator,
-            addr: net.Address,
             conf: config.Config,
             txm: *TransactionManager,
             controller: *const Controller,
         ) Self {
             return Self{
                 .allocator = allocator,
-                .addr = addr,
                 .conf = conf,
                 .txm = txm,
                 .controller = controller,
@@ -41,11 +38,12 @@ pub fn Server(comptime Controller: type) type {
         }
 
         pub fn run(self: *Self) !void {
-            var server = try self.addr.listen(.{
+            const addr = self.conf.address;
+            var server = try addr.listen(.{
                 .reuse_address = true,
             });
 
-            log.info("HTTP server is ready at {}", .{fmtAddress(self.addr)});
+            log.info("HTTP server is ready at {}", .{fmtAddress(addr)});
 
             while (true) {
                 const conn = try server.accept();

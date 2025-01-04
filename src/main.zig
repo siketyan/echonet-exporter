@@ -23,6 +23,10 @@ const Server = @import("./server.zig").Server(Controller(BP35C0));
 // const Ip6Packet = packet.Ip6Packet;
 // const UdpPacket = packet.UdpPacket;
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -57,8 +61,7 @@ pub fn main() !void {
         // .writer = &writer,
     };
 
-    const addr = try net.Address.parseIp4("0.0.0.0", 9100);
-    var server = Server.init(allocator, addr, conf, &txm, &controller);
+    var server = Server.init(allocator, conf, &txm, &controller);
 
     try server.run();
 }
