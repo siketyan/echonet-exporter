@@ -522,7 +522,10 @@ pub fn BP35C0Raw(comptime Port: type) type {
             const sender = try self.readWord();
             defer self.allocator.free(sender);
             const side = try self.readUnsignedHex(u8);
-            const param = if (num == 0x21 or num == 0x45) try self.readUnsignedHex(u8) else null;
+            const param = if (num == 0x21 or num == 0x45) try self.readUnsignedHex(u8) else blk: {
+                _ = try self.readCRLF();
+                break :blk null;
+            };
 
             log.debug("< EVENT {X} {s} {X} {?X}", .{num, sender, side, param});
 
