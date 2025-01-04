@@ -188,6 +188,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
         pub fn close(self: *Self) void {
             self.skterm() catch {};
+            self.event_queue.deinit();
         }
 
         /// Write characters to the underlying port.
@@ -555,6 +556,10 @@ pub fn BP35C0Raw(comptime Port: type) type {
         }
 
         pub fn pollEvent(self: *Self, timeout: i32) !?Event {
+            if (self.event_queue.readableLength() > 0) {
+                return try self.waitEvent();
+            }
+
             if (!try self.port.poll(timeout)) {
                 return null;
             }
