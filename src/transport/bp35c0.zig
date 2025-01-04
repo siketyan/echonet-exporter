@@ -250,6 +250,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 if (mem.eql(u8, &buf, "FAIL")) {
                     _ = try reader.readByte();
                     _ = try reader.read(&buf);
+                    _ = try self.readCRLF();
 
                     inline for (@typeInfo(ErrorCode).@"enum".fields) |f| {
                         if (mem.eql(u8, &buf, f.name)) {
@@ -285,7 +286,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                     continue;
                 }
 
-                log.debug("Received an unexpected response: {s}", .{&buf});
+                log.debug("Received an unexpected response: {any}", .{&buf});
             }
         }
 
@@ -381,6 +382,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
                 if (b == CR) {
                     debug.assert(try reader.readByte() == LF);
+                    log.debug("Found CRLF instead of space while reading a word", .{});
                     break;
                 }
 
