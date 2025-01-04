@@ -516,18 +516,18 @@ pub fn BP35C0Raw(comptime Port: type) type {
         pub fn waitEvent(self: *Self) !Event {
             const head = try self.readWord();
             defer self.allocator.free(head);
-            try self.port.putBack(head);
             try self.port.putBack(" ");
+            try self.port.putBack(head);
 
-            if (std.mem.eql(u8, head, "EVENT")) {
+            if (mem.eql(u8, head, "EVENT")) {
                 return .{ .event = try self.readEvent() };
             }
 
-            if (std.mem.eql(u8, head, "EPANDESC")) {
+            if (mem.eql(u8, head, "EPANDESC")) {
                 return .{ .epandesc = try self.readEpandesc() };
             }
 
-            if (std.mem.eql(u8, head, "ERXUDP")) {
+            if (mem.eql(u8, head, "ERXUDP")) {
                 return .{ .erxudp = try self.readErxudp() };
             }
 
@@ -719,6 +719,10 @@ const TestingPort = struct {
         self.allocator.free(self.rx.buffer);
         self.allocator.free(self.tx.buffer);
         self.peek.deinit();
+    }
+
+    pub fn putBack(self: *Self, buf: []const u8) !void {
+        try self.peek.unget(buf);
     }
 
     const Reader = io.Reader(*Self, anyerror, read);
@@ -955,6 +959,26 @@ test "EVENT" {
         .side = .B,
         .param = null,
     };
+
+    try t.expectEqualDeep(expected, actual);
+}
+
+test "waitEvent" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer port.deinit();
+
+    @memcpy(port.rx.buffer[0..52], "EVENT 1F FE80:0000:0000:0000:021D:1290:0003:C890 0\r\n");
+
+    const actual = try bp35c0.waitEvent();
+    const expected: Event = .{ .event = .{
+        .num = 0x1F,
+        .sender = "\xFE\x80\x00\x00\x00\x00\x00\x00\x02\x1D\x12\x90\x00\x03\xC8\x90".*,
+        .side = .B,
+        .param = null,
+    } };
 
     try t.expectEqualDeep(expected, actual);
 }
