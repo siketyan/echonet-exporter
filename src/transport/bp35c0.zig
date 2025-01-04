@@ -242,6 +242,13 @@ pub fn BP35C0Raw(comptime Port: type) type {
             while (true) {
                 _ = try reader.readAll(&buf);
 
+                // FIXME: I don't know why, sometimes unread CRLF is read here.
+                if (mem.startsWith(u8, &buf, CRLF)) {
+                    log.debug("FIXME: Unread CRLF here", .{});
+                    @memcpy(buf[0..2], buf[2..4]);
+                    _ = try reader.readAll(buf[2..4]);
+                }
+
                 if (mem.eql(u8, &buf, "OK" ++ CRLF)) {
                     log.debug("< OK", .{});
                     return;
@@ -272,7 +279,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 }
 
                 if (mem.startsWith(u8, &buf, "SK")) {
-                    _ = try self.readLine();
+                    self.allocator.free(try self.readLine());
                     continue;
                 }
 
@@ -382,7 +389,6 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
                 if (b == CR) {
                     debug.assert(try reader.readByte() == LF);
-                    log.debug("Found CRLF instead of space while reading a word", .{});
                     break;
                 }
 
