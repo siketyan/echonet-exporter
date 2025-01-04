@@ -57,7 +57,7 @@ pub fn Server(comptime Controller: type) type {
 
         fn handleConnection(self: *Self, conn: net.Server.Connection) !void {
             var http_server = http.Server.init(conn, &self.rx_buf);
-            while (true) {
+            while (http_server.state == .ready) {
                 var request = http_server.receiveHead() catch continue;
 
                 log.info("{s} {s} {s}", .{
