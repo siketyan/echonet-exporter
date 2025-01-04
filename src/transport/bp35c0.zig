@@ -604,7 +604,6 @@ pub fn BP35C0(comptime Port: type) type {
 
         is_connected: bool = false,
         remote_addr: ?[16]u8 = null,
-        credentials: ?Credentials = null,
 
         pub fn init(port: *Port, allocator: mem.Allocator, options: Options) !Self {
             return Self{
@@ -627,7 +626,7 @@ pub fn BP35C0(comptime Port: type) type {
         }
 
         pub fn connect(self: *Self) !void {
-            if (self.credentials) |creds| {
+            if (self.options.credentials) |creds| {
                 try self.raw.sksetrbid(creds.rbid);
                 try self.raw.sksetpwd(creds.pwd);
             }
