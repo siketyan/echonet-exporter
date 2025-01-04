@@ -620,12 +620,12 @@ pub fn BP35C0(comptime Port: type) type {
             // Use the first EPANDESC for the connection.
             const epandesc = try self.raw.readEpandesc();
 
-            // Ignore other ones until scan completed (EVENT 21).
+            // Ignore other ones until scan completed (EVENT 22).
             while (true) {
                 const event = try self.raw.waitEvent();
                 switch (event) {
                     .event => |e| switch (e.num) {
-                        0x21 => break,
+                        0x22 => break,
                         else => log.debug("Ignored an event: {}", .{e}),
                     },
                     else => log.debug("Ignored an event: {}", .{event}),
