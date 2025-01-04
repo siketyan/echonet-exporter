@@ -47,7 +47,7 @@ pub fn main() !void {
     var port = try SerialPort.open(conf.device.asSlice(), 115_200, allocator);
     defer port.close();
 
-    var bp35c0 = BP35C0.init(&port, allocator, .{
+    var bp35c0 = try BP35C0.init(&port, allocator, .{
         .credentials = .{
             .rbid = conf.credentials.rbid.asSlice(),
             .pwd = conf.credentials.pwd.asSlice(),

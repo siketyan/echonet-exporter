@@ -178,7 +178,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
         }
 
         pub fn init(port: *Port, allocator: mem.Allocator) !Self {
-            const self = initUnsafe(port, allocator);
+            var self = initUnsafe(port, allocator);
 
             try self.skreset();
             try self.sksreg(.SFE, "0"); // Turn off echo-back
@@ -601,9 +601,9 @@ pub fn BP35C0(comptime Port: type) type {
         remote_addr: ?[16]u8 = null,
         credentials: ?Credentials = null,
 
-        pub fn init(port: *Port, allocator: mem.Allocator, options: Options) Self {
+        pub fn init(port: *Port, allocator: mem.Allocator, options: Options) !Self {
             return Self{
-                .raw = BP35C0Raw(Port).initUnsafe(port, allocator),
+                .raw = try BP35C0Raw(Port).init(port, allocator),
                 .allocator = allocator,
                 .options = options,
             };
