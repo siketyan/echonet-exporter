@@ -270,6 +270,11 @@ pub fn BP35C0Raw(comptime Port: type) type {
                     debug.panic("Unexpected error code {s}", .{&buf});
                 }
 
+                if (mem.startsWith(u8, &buf, "SK")) {
+                    _ = try self.readLine();
+                    continue;
+                }
+
                 if (buf[0] == 'E') {
                     try self.port.putBack(&buf);
 
@@ -280,7 +285,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                     continue;
                 }
 
-                log.debug("Received an unexpected response. Did you turned off echo-back?: {s}", .{&buf});
+                log.debug("Received an unexpected response: {s}", .{&buf});
             }
         }
 
