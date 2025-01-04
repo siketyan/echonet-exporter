@@ -8,16 +8,18 @@ const net = std.net;
 
 const pcapfile = @import("pcapfile");
 
-const Connection = @import("./connection.zig").Connection;
-const Client = @import("./client.zig").Client;
-const TransactionManager = @import("./transaction.zig").TransactionManager;
+const transport = @import("./transport.zig");
+const SerialPort = transport.SerialPort;
+const BP35C0 = transport.BP35C0(SerialPort);
 
-const packet = @import("./packet.zig");
-const Ip6Packet = packet.Ip6Packet;
-const UdpPacket = packet.UdpPacket;
+const TransactionManager = @import("./transaction.zig").TransactionManager;
 
 const config = @import("./config.zig");
 const echonet = @import("./echonet.zig");
+
+// const packet = @import("./packet.zig");
+// const Ip6Packet = packet.Ip6Packet;
+// const UdpPacket = packet.UdpPacket;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -33,53 +35,25 @@ pub fn main() !void {
     // var writer = pcapfile.pcap.initWriter(.{ .network = .IPV6 }, pcap_fd.writer());
     // try writer.writeFileHeader();
 
-    var client = Client.init(try Connection.init(conf.device.asSlice()), allocator);
-    defer client.close();
+    var port = try SerialPort.open(conf.device.asSlice(), 115_200, allocator);
+    defer port.close();
 
-    try client.skreset();
-    try client.sksreg("SFE", "0"); // Disable echo-back
+    var bp35c0 = BP35C0.init(&port, allocator, .{
+        .credentials = .{
+            .rbid = conf.credentials.rbid.asSlice(),
+            .pwd = conf.credentials.pwd.asSlice(),
+        },
+    });
+    defer bp35c0.close();
 
-    // Set credentials
-    try client.sksetpwd(conf.credentials.pwd.asSlice());
-    try client.sksetrbid(conf.credentials.rbid.asSlice());
-
-    try client.skscan(2, 0xFFFFFFFF, 5, 0);
-
-    const epandesc = loop: {
-        var desc: ?Client.Epandesc = null;
-        while (true) {
-            const event = try client.readEvent();
-            if (event.num == 0x20) {
-                desc = try client.readEpandesc();
-            } else {
-                break :loop desc;
-            }
-        }
-    } orelse return;
-
-    try client.sksreg("S2", try std.fmt.allocPrint(allocator, "{X:0>2}", .{epandesc.channel}));
-    try client.sksreg("S3", try std.fmt.allocPrint(allocator, "{X:0>4}", .{epandesc.pan_id}));
-
-    var ip6_addr = try client.skll64(epandesc.addr);
-    try client.skjoin(ip6_addr);
-
-    ip6_addr.setPort(3610);
-
-    while (true) {
-        const event = try client.readEventLike();
-        switch (event) {
-            .event => |e| if (e.num == 0x25) break,
-            else => log.debug("Ignored an event: {any}", .{event}),
-        }
-    }
+    try bp35c0.connect();
 
     var txm = TransactionManager.init();
 
     const State = struct {
         allocator: mem.Allocator,
-        client: *Client,
+        transport: *BP35C0,
         // writer: *@TypeOf(writer),
-        addr: net.Ip6Address,
         deoj: echonet.EOJ,
 
         const Self = @This();
@@ -88,19 +62,15 @@ pub fn main() !void {
             const buf = try req.toBytesAlloc(state.allocator);
             defer state.allocator.free(buf);
 
-            try state.client.sksendto(1, state.addr, 1, 0, buf);
+            try state.transport.send(buf);
 
             var resp: echonet.Frame = undefined;
             while (true) {
-                // Wait for events
-                if (!try state.client.conn.poll(5000)) {
-                    return null;
-                }
-
-                const event = try state.client.readEventLike();
-                const e = switch (event) {
-                    .erxudp => |e| e,
-                    else => continue,
+                const data = state.transport.recv(5000) catch |err| {
+                    switch (err) {
+                        error.TimedOut => return null,
+                        else => return err,
+                    }
                 };
 
                 // const udp = UdpPacket.init(e.sender, e.dest, e.data);
@@ -114,27 +84,24 @@ pub fn main() !void {
                 //
                 // try state.writer.writeRecord(.{}, try ip6.toBytesAlloc(state.allocator));
 
-                if (e.dest.getPort() == 3610) {
-                    var stream = io.fixedBufferStream(e.data);
-                    try resp.readAlloc(stream.reader().any(), state.allocator);
-                    defer resp.deinit();
+                var stream = io.fixedBufferStream(data);
+                try resp.readAlloc(stream.reader().any(), state.allocator);
+                defer resp.deinit();
 
-                    if (resp.getTID() != req.getTID()) {
-                        log.info("Response from another transaction, ignoring: {any}", .{resp});
-                        continue;
-                    }
-
-                    return try resp.clone();
+                if (resp.getTID() != req.getTID()) {
+                    log.info("Response from another transaction, ignoring: {any}", .{resp});
+                    continue;
                 }
+
+                return try resp.clone();
             }
         }
     };
 
     const state = State{
         .allocator = allocator,
-        .client = &client,
+        .transport = &bp35c0,
         // .writer = &writer,
-        .addr = ip6_addr,
         .deoj = .{
             .class_group_code = conf.target.class_group_code,
             .class_code = conf.target.class_code,
@@ -245,7 +212,6 @@ pub fn main() !void {
     }
 }
 
-test {
-    std.testing.refAllDecls(config);
-    std.testing.refAllDecls(echonet);
+comptime {
+    std.testing.refAllDecls(@This());
 }
