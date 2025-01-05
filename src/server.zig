@@ -161,7 +161,12 @@ pub fn Server(comptime Controller: type) type {
                 }
             }
 
-            try request.respond(body.items, .{});
+            try request.respond(body.items, .{
+                .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "text/plain; version=0.0.4" },
+                },
+            });
+
             log.info("200 OK", .{});
         }
     };
@@ -264,12 +269,13 @@ test "handleRequest" {
         \\HTTP/1.1 200 OK
         \\connection: close
         \\content-length: 118
+        \\Content-Type: text/plain; version=0.0.4
         \\
         \\
     ;
 
     // Replace LF to CRLF.
-    var expected_header: [expected_header_lf.len + 4]u8 = undefined;
+    var expected_header: [expected_header_lf.len + 5]u8 = undefined;
     _ = mem.replace(u8, expected_header_lf, "\n", "\r\n", &expected_header);
 
     const expected_body =
