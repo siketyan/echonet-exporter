@@ -138,16 +138,19 @@ pub fn Server(comptime Controller: type) type {
                 const reader = stream.reader();
 
                 for (property.layout.items) |layout| {
-                    const measure: config.Measure = for (self.conf.measures.items) |m| {
+                    const name = layout.name.asSlice();
+                    try std.fmt.format(writer, "# TYPE {s} gauge\n", .{name});
+
+                    const measure: ?config.Measure = for (self.conf.measures.items) |m| {
                         if (mem.eql(u8, m.name.asSlice(), layout.name.asSlice())) {
                             break m;
                         }
-                    } else continue;
+                    } else null;
 
-                    const name = measure.name.asSlice();
-                    try std.fmt.format(writer, "# TYPE {s} gauge\n", .{name});
-                    if (measure.help) |help| {
-                        try std.fmt.format(writer, "# HELP {s} {s}\n", .{ name, help.asSlice() });
+                    if (measure) |m| {
+                        if (m.help) |help| {
+                            try std.fmt.format(writer, "# HELP {s} {s}\n", .{ name, help.asSlice() });
+                        }
                     }
 
                     try writer.writeAll(name);
