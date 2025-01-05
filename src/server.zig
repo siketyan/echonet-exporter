@@ -126,38 +126,43 @@ pub fn Server(comptime Controller: type) type {
             defer body.deinit();
             const writer = body.writer();
 
-            for (self.conf.measures.items) |measure| {
-                const name = measure.name.asSlice();
-                try std.fmt.format(writer, "# TYPE {s} gauge\n", .{name});
-                if (measure.help) |help| {
-                    try std.fmt.format(writer, "# HELP {s} {s}\n", .{ name, help.asSlice() });
-                }
+            for (self.conf.properties.items) |property| {
 
-                for (self.conf.properties.items) |property| {
-                    const edt: std.ArrayList(u8) = for (resp.format1.edata.props.asSlice()) |p| {
-                        if (p.epc == property.epc) {
-                            if (p.edt) |edt| break edt;
+                const edt: std.ArrayList(u8) = for (resp.format1.edata.props.asSlice()) |p| {
+                    if (p.epc == property.epc) {
+                        if (p.edt) |edt| break edt;
+                    }
+                } else continue;
+
+                var stream = io.fixedBufferStream(edt.items);
+                const reader = stream.reader();
+
+                for (property.layout.items) |layout| {
+                    const measure: config.Measure = for (self.conf.measures.items) |m| {
+                        if (mem.eql(u8, m.name.asSlice(), layout.name.asSlice())) {
+                            break m;
                         }
                     } else continue;
 
-                    var stream = io.fixedBufferStream(edt.items);
-                    const reader = stream.reader();
-
-                    for (property.layout.items) |layout| {
-                        try writer.writeAll(name);
-                        try writer.writeByte(' ');
-
-                        try switch (layout.type) {
-                            .signed_char => std.fmt.formatIntValue(try reader.readInt(i8, .big), "d", .{}, writer),
-                            .signed_short => std.fmt.formatIntValue(try reader.readInt(i16, .big), "d", .{}, writer),
-                            .signed_long => std.fmt.formatIntValue(try reader.readInt(i32, .big), "d", .{}, writer),
-                            .unsigned_char => std.fmt.formatIntValue(try reader.readInt(u8, .big), "d", .{}, writer),
-                            .unsigned_short => std.fmt.formatIntValue(try reader.readInt(u16, .big), "d", .{}, writer),
-                            .unsigned_long => std.fmt.formatIntValue(try reader.readInt(u32, .big), "d", .{}, writer),
-                        };
-
-                        try writer.writeByte('\n');
+                    const name = measure.name.asSlice();
+                    try std.fmt.format(writer, "# TYPE {s} gauge\n", .{name});
+                    if (measure.help) |help| {
+                        try std.fmt.format(writer, "# HELP {s} {s}\n", .{ name, help.asSlice() });
                     }
+
+                    try writer.writeAll(name);
+                    try writer.writeByte(' ');
+
+                    try switch (layout.type) {
+                        .signed_char => std.fmt.formatIntValue(try reader.readInt(i8, .big), "d", .{}, writer),
+                        .signed_short => std.fmt.formatIntValue(try reader.readInt(i16, .big), "d", .{}, writer),
+                        .signed_long => std.fmt.formatIntValue(try reader.readInt(i32, .big), "d", .{}, writer),
+                        .unsigned_char => std.fmt.formatIntValue(try reader.readInt(u8, .big), "d", .{}, writer),
+                        .unsigned_short => std.fmt.formatIntValue(try reader.readInt(u16, .big), "d", .{}, writer),
+                        .unsigned_long => std.fmt.formatIntValue(try reader.readInt(u32, .big), "d", .{}, writer),
+                    };
+
+                    try writer.writeByte('\n');
                 }
             }
 
@@ -186,16 +191,28 @@ test "handleRequest" {
             .class_code = 0x88,
             .instance_code = 0x01,
         },
-        .measures = try util.listFromSlice(config.Measure, t.allocator, &.{.{
-            .name = try config.String.fromSlice(t.allocator, "measured_instantaneous_electric_power"),
-            .help = try config.String.fromSlice(t.allocator, "瞬時電力計測値"),
-        }}),
+        .measures = try util.listFromSlice(config.Measure, t.allocator, &.{
+            .{
+                .name = try config.String.fromSlice(t.allocator, "measured_instantaneous_current_r"),
+                .help = try config.String.fromSlice(t.allocator, "瞬時電流計測値 (R 相)"),
+            },
+            .{
+                .name = try config.String.fromSlice(t.allocator, "measured_instantaneous_current_t"),
+                .help = try config.String.fromSlice(t.allocator, "瞬時電流計測値 (T 相)"),
+            },
+        }),
         .properties = try util.listFromSlice(config.Property, t.allocator, &.{.{
-            .epc = 0xE7,
-            .layout = try util.listFromSlice(config.Layout, t.allocator, &.{.{
-                .type = .signed_long,
-                .name = try config.String.fromSlice(t.allocator, "measured_instantaneous_electric_power"),
-            }}),
+            .epc = 0xE8,
+            .layout = try util.listFromSlice(config.Layout, t.allocator, &.{
+                .{
+                    .type = .signed_short,
+                    .name = try config.String.fromSlice(t.allocator, "measured_instantaneous_current_r"),
+                },
+                .{
+                    .type = .signed_short,
+                    .name = try config.String.fromSlice(t.allocator, "measured_instantaneous_current_t"),
+                },
+            }),
         }}),
     };
     defer conf.deinit();
@@ -219,7 +236,10 @@ test "handleRequest" {
                             .instance_code = 0x01,
                         },
                         .esv = 0x63, // Get_Res
-                        .props = try echonet.PropertyList.fromSlice(t.allocator, &.{}),
+                        .props = try echonet.PropertyList.fromSlice(t.allocator, &.{.{
+                            .epc = 0xE8,
+                            .edt = try util.listFromSlice(u8, t.allocator, "\x12\x34\x56\x79"),
+                        }}),
                     },
                 },
             };
@@ -268,7 +288,7 @@ test "handleRequest" {
     const expected_header_lf =
         \\HTTP/1.1 200 OK
         \\connection: close
-        \\content-length: 118
+        \\content-length: 309
         \\Content-Type: text/plain; version=0.0.4
         \\
         \\
@@ -279,8 +299,12 @@ test "handleRequest" {
     _ = mem.replace(u8, expected_header_lf, "\n", "\r\n", &expected_header);
 
     const expected_body =
-        \\# TYPE measured_instantaneous_electric_power gauge
-        \\# HELP measured_instantaneous_electric_power 瞬時電力計測値
+        \\# TYPE measured_instantaneous_current_r gauge
+        \\# HELP measured_instantaneous_current_r 瞬時電流計測値 (R 相)
+        \\measured_instantaneous_current_r 4660
+        \\# TYPE measured_instantaneous_current_t gauge
+        \\# HELP measured_instantaneous_current_t 瞬時電流計測値 (T 相)
+        \\measured_instantaneous_current_t 22137
         \\
     ;
 
