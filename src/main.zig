@@ -48,10 +48,10 @@ pub fn main() !void {
     defer port.close();
 
     var bp35c0 = try BP35C0.init(&port, allocator, .{
-        .credentials = .{
-            .rbid = conf.credentials.rbid.asSlice(),
-            .pwd = conf.credentials.pwd.asSlice(),
-        },
+        .credentials = if (conf.credentials) |creds| .{
+            .rbid = creds.rbid.asSlice(),
+            .pwd = creds.pwd.asSlice(),
+        } else null,
     });
     defer bp35c0.close();
 
