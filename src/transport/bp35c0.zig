@@ -359,6 +359,8 @@ pub fn BP35C0Raw(comptime Port: type) type {
             try self.port.writer().writeAll(data);
             try self.port.writer().writeAll(CRLF);
 
+            log.debug("> {}", .{std.fmt.fmtSliceHexUpper(data)});
+
             return try self.readResult();
         }
 
@@ -435,7 +437,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
             _ = try self.readCRLF();
 
-            log.debug("< ERXUDP {s} {s} {X:0>4} {X:0>4} {s} {X} {X} {X:0>4}", .{
+            log.debug("< ERXUDP {s} {s} {X:0>4} {X:0>4} {s} {X} {X} {X:0>4} {}", .{
                 sender,
                 dest,
                 rport,
@@ -444,6 +446,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 secured,
                 side,
                 data_len,
+                std.fmt.fmtSliceHexUpper(data),
             });
 
             return .{
