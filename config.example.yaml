@@ -8,7 +8,84 @@ target:
   class_code: 0x88        # 低圧スマート電力量メータクラス
   instance_code: 0x01
 measures:
+  - name: operation_status
+    help: 動作状態
+  - name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_year
+    help: 1 分積算電力量計測値 (年)
+  - name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_month
+    help: 1 分積算電力量計測値 (月)
+  - name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_day
+    help: 1 分積算電力量計測値 (日)
+  - name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_hour
+    help: 1 分積算電力量計測値 (時)
+  - name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_minute
+    help: 1 分積算電力量計測値 (分)
+  - name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_second
+    help: 1 分積算電力量計測値 (秒)
+  - name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_normal
+    help: 1 分積算電力量計測値 (正方向)
+  - name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_reverse
+    help: 1 分積算電力量計測値 (逆方向)
+  - name: num_of_effective_digits_for_cumulative_amount_of_electric_energy
+    help: 積算電力量有効桁数
+  - name: measured_cumulative_amount_of_electric_energy_normal
+    help: 積算電力量計測値 (正方向)
+  - name: unit_for_cumulative_amount_of_electric_energy
+    help: 積算電力量単位
+  - name: measured_cumulative_amount_of_electric_energy_reverse
+    help: 積算電力量計測値 (逆方向)
   - name: measured_instantaneous_electric_power
     help: 瞬時電力計測値
-    epc: 0xE7
-    type: signed_long
+  - name: measured_instantaneous_current_r
+    help: 瞬時電流計測値 (R 相)
+  - name: measured_instantaneous_current_t
+    help: 瞬時電流計測値 (T 相)
+properties:
+  - epc: 0x80
+    layout:
+      - type: unsigned_char
+        name: operation_status
+  - epc: 0xD0
+    layout:
+      - type: unsigned_short
+        name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_year
+      - type: unsigned_char
+        name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_month
+      - type: unsigned_char
+        name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_day
+      - type: unsigned_char
+        name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_hour
+      - type: unsigned_char
+        name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_minute
+      - type: unsigned_char
+        name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_second
+      - type: unsigned_long
+        name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_normal
+      - type: unsigned_long
+        name: one_minute_measured_cumulative_amounts_of_electric_energy_measured_reverse
+  - epc: 0xD7
+    layout:
+      - type: unsigned_char
+        name: num_of_effective_digits_for_cumulative_amount_of_electric_energy
+  - epc: 0xE0
+    layout:
+      - type: unsigned_long
+        name: measured_cumulative_amount_of_electric_energy_normal
+  - epc: 0xE1
+    layout:
+      - type: unsigned_char
+        name: unit_for_cumulative_amount_of_electric_energy
+  - epc: 0xE4
+    layout:
+      - type: unsigned_long
+        name: measured_cumulative_amount_of_electric_energy_reverse
+  - epc: 0xE7
+    layout:
+      - type: signed_long
+        name: measured_instantaneous_electric_power
+  - epc: 0xE8
+    layout:
+      - type: signed_short
+        name: measured_instantaneous_current_r
+      - type: signed_short
+        name: measured_instantaneous_current_t

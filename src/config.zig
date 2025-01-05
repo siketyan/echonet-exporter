@@ -5,7 +5,7 @@ const mem = std.mem;
 
 const yaml = @import("yaml");
 
-const String = struct {
+pub const String = struct {
     list: std.ArrayList(u8),
 
     pub fn deinit(self: String) void {
@@ -24,6 +24,49 @@ const String = struct {
     }
 };
 
+fn parseString(value: yaml.Value, allocator: mem.Allocator) !String {
+    return try String.fromSlice(allocator, try value.asString());
+}
+
+fn parseArrayList(comptime T: type, value: yaml.Value, allocator: mem.Allocator) !std.ArrayList(T) {
+    const value_list = try value.asList();
+    var list = try std.ArrayList(T).initCapacity(allocator, value_list.len);
+    for (value_list) |v| {
+        var item: T = undefined;
+        try item.parseYamlAlloc(v, allocator);
+        list.appendAssumeCapacity(item);
+    }
+
+    return list;
+}
+
+fn parseOptional(comptime T: type, value: ?yaml.Value, allocator: mem.Allocator) !?T {
+    if (value) |v| {
+        var out: T = undefined;
+        try out.parseYamlAlloc(v, allocator);
+        return out;
+    } else {
+        return null;
+    }
+}
+
+fn parseEnum(comptime T: type, value: yaml.Value) !T {
+    const str = try value.asString();
+    return inline for (@typeInfo(Type).@"enum".fields) |f| {
+        if (mem.eql(u8, f.name, str)) {
+            break @enumFromInt(f.value);
+        }
+    } else error.InvalidEnumValue;
+}
+
+fn deinitAll(comptime T: type, list: std.ArrayList(T)) void {
+    for (list.items) |item| {
+        item.deinit();
+    }
+
+    list.deinit();
+}
+
 pub const Credentials = struct {
     rbid: String,
     pwd: String,
@@ -36,8 +79,8 @@ pub const Credentials = struct {
     pub fn parseYamlAlloc(self: *Credentials, value: yaml.Value, allocator: mem.Allocator) !void {
         const map = try value.asMap();
 
-        self.rbid = try String.fromSlice(allocator, try map.get("rbid").?.asString());
-        self.pwd = try String.fromSlice(allocator, try map.get("pwd").?.asString());
+        self.rbid = try parseString(map.get("rbid").?, allocator);
+        self.pwd = try parseString(map.get("pwd").?, allocator);
     }
 };
 
@@ -56,14 +99,17 @@ pub const Target = struct {
 };
 
 pub const Type = enum {
+    signed_char,
+    signed_short,
     signed_long,
+    unsigned_char,
+    unsigned_short,
+    unsigned_long,
 };
 
 pub const Measure = struct {
     name: String,
     help: ?String,
-    epc: u8,
-    type: Type,
 
     pub fn deinit(self: Measure) void {
         self.name.deinit();
@@ -75,29 +121,54 @@ pub const Measure = struct {
 
         self.name = try String.fromSlice(allocator, try map.get("name").?.asString());
         self.help = if (map.get("help")) |v| try String.fromSlice(allocator, try v.asString()) else null;
-        self.epc = @intCast(try map.get("epc").?.asInt());
+    }
+};
 
-        const type_raw = try map.get("type").?.asString();
-        self.type = inline for (@typeInfo(Type).@"enum".fields) |f| {
-            if (mem.eql(u8, f.name, type_raw)) {
-                break @enumFromInt(f.value);
-            }
-        } else unreachable;
+pub const Layout = struct {
+    type: Type,
+    name: String,
+
+    pub fn deinit(self: Layout) void {
+        self.name.deinit();
+    }
+
+    pub fn parseYamlAlloc(self: *Layout, value: yaml.Value, allocator: mem.Allocator) !void {
+        const map = try value.asMap();
+
+        self.type = try parseEnum(Type, map.get("type").?);
+        self.name = try parseString(map.get("name").?, allocator);
+    }
+};
+
+pub const Property = struct {
+    epc: u8,
+    layout: std.ArrayList(Layout),
+
+    pub fn deinit(self: Property) void {
+        deinitAll(Layout, self.layout);
+    }
+
+    pub fn parseYamlAlloc(self: *Property, value: yaml.Value, allocator: mem.Allocator) !void {
+        const map = try value.asMap();
+
+        self.epc = @intCast(try map.get("epc").?.asInt());
+        self.layout = try parseArrayList(Layout, map.get("layout").?, allocator);
     }
 };
 
 pub const Config = struct {
     address: std.net.Address,
     device: String,
-    credentials: Credentials,
+    credentials: ?Credentials = null,
     target: Target,
     measures: std.ArrayList(Measure),
+    properties: std.ArrayList(Property),
 
     pub fn deinit(self: Config) void {
         self.device.deinit();
-        self.credentials.deinit();
-        for (self.measures.items) |m| m.deinit();
-        self.measures.deinit();
+        if (self.credentials) |creds| creds.deinit();
+        deinitAll(Measure, self.measures);
+        deinitAll(Property, self.properties);
     }
 
     pub fn parseYamlAlloc(self: *Config, value: yaml.Value, allocator: mem.Allocator) !void {
@@ -110,15 +181,10 @@ pub const Config = struct {
         );
 
         self.device = try String.fromSlice(allocator, try map.get("device").?.asString());
-        try self.credentials.parseYamlAlloc(map.get("credentials").?, allocator);
+        self.credentials = try parseOptional(Credentials, map.get("credentials"), allocator);
         try self.target.parseYaml(map.get("target").?);
-
-        const measures_raw = try map.get("measures").?.asList();
-        const measures = try allocator.alloc(Measure, measures_raw.len);
-        for (0..measures.len) |i| {
-            try measures[i].parseYamlAlloc(measures_raw[i], allocator);
-        }
-        self.measures = std.ArrayList(Measure).fromOwnedSlice(allocator, measures);
+        self.measures = try parseArrayList(Measure, map.get("measures").?, allocator);
+        self.properties = try parseArrayList(Property, map.get("properties").?, allocator);
     }
 
     pub fn loadYamlAlloc(buf: []const u8, alloc: mem.Allocator) !Config {
@@ -142,6 +208,13 @@ pub const Config = struct {
     }
 };
 
+fn listFromSlice(comptime T: type, allocator: mem.Allocator, slice: []const T) !std.ArrayList(T) {
+    var list = try std.ArrayList(T).initCapacity(allocator, slice.len);
+    list.appendSliceAssumeCapacity(slice);
+
+    return list;
+}
+
 test "load config" {
     const t = std.testing;
 
@@ -158,8 +231,11 @@ test "load config" {
         \\measures:
         \\  - name: measured_instantaneous_electric_power
         \\    help: 瞬時電力計測値
-        \\    epc: 0xE7
-        \\    type: signed_long
+        \\properties:
+        \\  - epc: 0xE7
+        \\    layout:
+        \\      - type: signed_long
+        \\        name: measured_instantaneous_electric_power
     ;
 
     const actual = try Config.loadYamlAlloc(config, t.allocator);
@@ -177,16 +253,17 @@ test "load config" {
             .class_code = 0x88,
             .instance_code = 0x01,
         },
-        .measures = blk: {
-            var list = try std.ArrayList(Measure).initCapacity(t.allocator, 1);
-            list.appendAssumeCapacity(.{
-                .name = try String.fromSlice(t.allocator, "measured_instantaneous_electric_power"),
-                .help = try String.fromSlice(t.allocator, "瞬時電力計測値"),
-                .epc = 0xE7,
+        .measures = try listFromSlice(Measure, t.allocator, &.{.{
+            .name = try String.fromSlice(t.allocator, "measured_instantaneous_electric_power"),
+            .help = try String.fromSlice(t.allocator, "瞬時電力計測値"),
+        }}),
+        .properties = try listFromSlice(Property, t.allocator, &.{.{
+            .epc = 0xE7,
+            .layout = try listFromSlice(Layout, t.allocator, &.{.{
                 .type = .signed_long,
-            });
-            break :blk list;
-        },
+                .name = try String.fromSlice(t.allocator, "measured_instantaneous_electric_power"),
+            }}),
+        }}),
     };
     defer expected.deinit();
 
