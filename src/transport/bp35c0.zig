@@ -243,11 +243,28 @@ pub fn BP35C0Raw(comptime Port: type) type {
             try expect(mem.eql(u8, &buf, CRLF), "CRLF");
         }
 
+        /// Discard the line breaks that precede the next response.
+        /// The device puts a CRLF of its own before some responses, notably the
+        /// one to SKSENDTO, so a response is not always where the stream is.
+        fn skipLineBreaks(self: *Self) !void {
+            while (true) {
+                const b = try self.port.readByte();
+                if (b == CR or b == LF) continue;
+
+                const buf = [_]u8{b};
+                return try self.port.putBack(&buf);
+            }
+        }
+
         /// Read the next response from the device and interpret as an error or void.
         fn readResult(self: *Self) !void {
             var buf: [4]u8 = undefined;
 
             while (true) {
+                // A response may be preceded by a CRLF, and a notification that
+                // arrives while a command is in flight brings its own, so the
+                // stream has to be realigned before every read of a fixed size.
+                try self.skipLineBreaks();
                 try self.port.readAll(&buf);
 
                 if (mem.eql(u8, &buf, "OK" ++ CRLF)) {
@@ -297,6 +314,17 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 }
 
                 log.debug("Received an unexpected response: {any}", .{&buf});
+
+                // Realign at the next line break: reading another four bytes
+                // would keep the stream misaligned and every response after it
+                // would be unexpected too. The break may be among the bytes
+                // just read, in which case what follows it is the next
+                // response and must be kept.
+                if (mem.indexOfAny(u8, &buf, CRLF)) |i| {
+                    try self.port.putBack(buf[i..]);
+                } else {
+                    self.allocator.free(try self.readLine());
+                }
             }
         }
 
@@ -371,8 +399,9 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
             log.debug("> {X}", .{data});
 
-            // Unlike other commands, the response to SKSENDTO starts with CRLF.
-            try self.readCRLF();
+            // Unlike other commands, the response to SKSENDTO starts with CRLF,
+            // which readResult skips along with anything else the device sends
+            // before it, such as an ERXUDP that was already on its way.
             return try self.readResult();
         }
 
@@ -1249,7 +1278,7 @@ test "EPANDESC - reports a truncated pair ID" {
     try t.expectError(error.UnexpectedResponse, bp35c0.readEpandesc());
 }
 
-test "SKSENDTO - reports a response that does not start with CRLF" {
+test "SKSENDTO - accepts a response that does not start with CRLF" {
     const t = std.testing;
 
     var port = try TestingPort.init(t.allocator);
@@ -1258,16 +1287,70 @@ test "SKSENDTO - reports a response that does not start with CRLF" {
     var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
     defer bp35c0.event_queue.deinit(t.allocator);
 
-    port.feed("XXOK" ++ CRLF);
+    // The leading CRLF is what the device usually sends, not a promise.
+    port.feed("OK" ++ CRLF);
 
-    try t.expectError(error.UnexpectedResponse, bp35c0.sksendto(
+    try bp35c0.sksendto(
         1,
         "\xFE\x80\x00\x00\x00\x00\x00\x00\x02\x1D\x12\x90\x12\x34\x56\x78".*,
         3610,
         .encrypted,
         .B,
         "12345",
-    ));
+    );
+}
+
+test "SKSENDTO - postpones a notification that precedes the response" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    // A packet received just before the command was written arrives where the
+    // CRLF was expected, which used to eat the first two bytes of it and leave
+    // the stream misaligned for every response after it.
+    port.feed(erxudpResponse(other_ip6_addr, "99999"));
+    port.feed(CRLF ++ "OK" ++ CRLF);
+
+    try bp35c0.sksendto(
+        1,
+        "\xFE\x80\x00\x00\x00\x00\x00\x00\x02\x1D\x12\x90\x12\x34\x56\x78".*,
+        3610,
+        .encrypted,
+        .B,
+        "12345",
+    );
+
+    try t.expectEqual(1, bp35c0.event_queue.len);
+
+    const event = try bp35c0.waitEvent();
+    defer event.deinit();
+    try t.expectEqualStrings("99999", event.erxudp.data);
+}
+
+test "readResult - realigns itself after an unexpected response" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    // The rest of the line goes with the garbage, so the response behind it is
+    // read as a response and not as four more bytes of garbage.
+    port.feed("XX" ++ CRLF); // Ends within the four bytes that were read
+    port.feed("OK" ++ CRLF);
+
+    try bp35c0.skreset();
+
+    port.feed("XXXXXX" ++ CRLF); // Runs past them
+    port.feed("OK" ++ CRLF);
+
+    try bp35c0.skreset();
 }
 
 const epandesc_response =
