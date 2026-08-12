@@ -4,6 +4,8 @@ const io = std.Io;
 const mem = std.mem;
 const ArrayList = std.array_list.Managed;
 
+const util = @import("./util.zig");
+
 pub const EOJ = struct {
     /// Class group code
     class_group_code: u8,
@@ -192,13 +194,13 @@ pub const Frame = union(enum) {
         /// Transaction ID
         tid: u16,
         /// ECHONET Lite data
-        edata: []u8,
+        edata: ArrayList(u8),
     };
 
     pub fn deinit(self: Frame) void {
         switch (self) {
             .format1 => |f| f.edata.deinit(),
-            else => {},
+            .format2 => |f| f.edata.deinit(),
         }
     }
 
@@ -206,7 +208,7 @@ pub const Frame = union(enum) {
         var cloned = self;
         switch (cloned) {
             .format1 => |*f| f.edata = try f.edata.clone(),
-            else => {},
+            .format2 => |*f| f.edata = try f.edata.clone(),
         }
 
         return cloned;
@@ -220,8 +222,9 @@ pub const Frame = union(enum) {
     }
 
     pub fn readAlloc(self: *Frame, reader: *io.Reader, alloc: mem.Allocator) !void {
+        // A frame arrives from the network, so a malformed one must not be fatal.
         const ehd1 = try reader.takeByte();
-        debug.assert(ehd1 == 0x10);
+        if (ehd1 != 0x10) return error.InvalidFrameHeader;
 
         const ehd2 = try reader.takeByte();
         switch (ehd2) {
@@ -233,9 +236,12 @@ pub const Frame = union(enum) {
             0x82 => {
                 self.* = .{ .format2 = undefined };
                 self.format2.tid = try reader.takeInt(u16, .big);
-                try reader.readSliceAll(self.format2.edata);
+
+                // The EDATA of a format 2 frame is arbitrary, so it spans the rest of the frame.
+                const edata = try reader.allocRemaining(alloc, .unlimited);
+                self.format2.edata = ArrayList(u8).fromOwnedSlice(alloc, edata);
             },
-            else => debug.panic("unexpected EHD2: 0x{X:0>2}", .{ehd2}),
+            else => return error.UnsupportedFrameFormat,
         }
     }
 
@@ -251,7 +257,7 @@ pub const Frame = union(enum) {
             .format2 => |f| {
                 try writer.writeByte(0x82); // EHD2
                 try writer.writeInt(u16, f.tid, .big);
-                try writer.writeAll(f.edata);
+                try writer.writeAll(f.edata.items);
             },
         }
     }
@@ -272,7 +278,7 @@ pub const Frame = union(enum) {
                 sum += f.edata.len();
             },
             .format2 => |f| {
-                sum += f.edata.len;
+                sum += f.edata.items.len;
             },
         }
 
@@ -347,4 +353,150 @@ test "writing to bytes - format 1" {
     defer t.allocator.free(bytes);
 
     try t.expectEqualStrings("\x10\x81\x12\x34\x05\xFF\x01\x02\x88\x01\x62\x02\xE7\x00\xE8\x00", bytes);
+}
+
+/// A Get_Res carrying 500 W in the instantaneous electric power (EPC 0xE7).
+const format1_with_edt = "\x10\x81\x12\x34\x02\x88\x01\x05\xFF\x01\x72\x01\xE7\x04\x00\x00\x01\xF4";
+
+/// Builds the frame equivalent to format1_with_edt.
+fn format1WithEdt(allocator: mem.Allocator) !Frame {
+    return Frame{
+        .format1 = .{
+            .tid = 0x1234,
+            .edata = .{
+                .seoj = .{
+                    .class_group_code = 0x02,
+                    .class_code = 0x88,
+                    .instance_code = 0x01,
+                },
+                .deoj = .{
+                    .class_group_code = 0x05,
+                    .class_code = 0xFF,
+                    .instance_code = 0x01,
+                },
+                .esv = 0x72, // Get_Res
+                .props = try PropertyList.fromSlice(allocator, &.{.{
+                    .epc = 0xE7,
+                    .edt = try util.listFromSlice(u8, allocator, "\x00\x00\x01\xF4"),
+                }}),
+            },
+        },
+    };
+}
+
+test "reading from bytes - format 1 with a property value" {
+    const t = std.testing;
+
+    var reader = io.Reader.fixed(format1_with_edt);
+
+    var actual: Frame = undefined;
+    try actual.readAlloc(&reader, t.allocator);
+    defer actual.deinit();
+
+    const expected = try format1WithEdt(t.allocator);
+    defer expected.deinit();
+
+    try t.expectEqualDeep(expected, actual);
+}
+
+test "writing to bytes - format 1 with a property value" {
+    const t = std.testing;
+
+    const frame = try format1WithEdt(t.allocator);
+    defer frame.deinit();
+
+    const bytes = try frame.toBytesAlloc(t.allocator);
+    defer t.allocator.free(bytes);
+
+    try t.expectEqualStrings(format1_with_edt, bytes);
+}
+
+test "reading from bytes - format 2" {
+    const t = std.testing;
+
+    var reader = io.Reader.fixed("\x10\x82\x12\x34\xDE\xAD\xBE\xEF");
+
+    var actual: Frame = undefined;
+    try actual.readAlloc(&reader, t.allocator);
+    defer actual.deinit();
+
+    try t.expectEqual(0x1234, actual.getTID());
+    try t.expectEqualStrings("\xDE\xAD\xBE\xEF", actual.format2.edata.items);
+}
+
+test "writing to bytes - format 2" {
+    const t = std.testing;
+
+    const frame = Frame{
+        .format2 = .{
+            .tid = 0x1234,
+            .edata = try util.listFromSlice(u8, t.allocator, "\xDE\xAD\xBE\xEF"),
+        },
+    };
+    defer frame.deinit();
+
+    const bytes = try frame.toBytesAlloc(t.allocator);
+    defer t.allocator.free(bytes);
+
+    try t.expectEqualStrings("\x10\x82\x12\x34\xDE\xAD\xBE\xEF", bytes);
+}
+
+test "reading from bytes - rejects an unknown EHD1" {
+    const t = std.testing;
+
+    var reader = io.Reader.fixed("\x20\x81\x12\x34\x05\xFF\x01\x02\x88\x01\x62\x00");
+
+    var frame: Frame = undefined;
+    try t.expectError(error.InvalidFrameHeader, frame.readAlloc(&reader, t.allocator));
+}
+
+test "reading from bytes - rejects an unsupported EHD2" {
+    const t = std.testing;
+
+    var reader = io.Reader.fixed("\x10\x83\x12\x34\xDE\xAD\xBE\xEF");
+
+    var frame: Frame = undefined;
+    try t.expectError(error.UnsupportedFrameFormat, frame.readAlloc(&reader, t.allocator));
+}
+
+test "clone - format 1 does not share the property value with the original" {
+    const t = std.testing;
+
+    const original = try format1WithEdt(t.allocator);
+    defer original.deinit();
+
+    const cloned = try original.clone();
+    defer cloned.deinit();
+
+    // Mutating the original must leave the clone untouched.
+    const edt = original.format1.edata.props.list.items[0].edt.?;
+    edt.items[0] = 0xFF;
+
+    const bytes = try cloned.toBytesAlloc(t.allocator);
+    defer t.allocator.free(bytes);
+
+    try t.expectEqualStrings(format1_with_edt, bytes);
+}
+
+test "clone - format 2 does not share the data with the original" {
+    const t = std.testing;
+
+    const original = Frame{
+        .format2 = .{
+            .tid = 0x1234,
+            .edata = try util.listFromSlice(u8, t.allocator, "\xDE\xAD\xBE\xEF"),
+        },
+    };
+    defer original.deinit();
+
+    const cloned = try original.clone();
+    defer cloned.deinit();
+
+    // Mutating the original must leave the clone untouched.
+    original.format2.edata.items[0] = 0xFF;
+
+    const bytes = try cloned.toBytesAlloc(t.allocator);
+    defer t.allocator.free(bytes);
+
+    try t.expectEqualStrings("\x10\x82\x12\x34\xDE\xAD\xBE\xEF", bytes);
 }
