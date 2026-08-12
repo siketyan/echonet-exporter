@@ -226,10 +226,21 @@ pub fn BP35C0Raw(comptime Port: type) type {
             return s;
         }
 
+        /// Reject a response that does not look like what the device promised.
+        /// These arrive over a serial line, so a corrupt one must not be fatal:
+        /// an assertion here would abort a safe build and be undefined
+        /// behaviour in a fast one.
+        fn expect(ok: bool, what: []const u8) !void {
+            if (ok) return;
+
+            log.warn("Unexpected response, expected {s}", .{what});
+            return error.UnexpectedResponse;
+        }
+
         fn readCRLF(self: *Self) !void {
             var buf: [2]u8 = undefined;
             try self.port.readAll(&buf);
-            debug.assert(mem.eql(u8, &buf, CRLF));
+            try expect(mem.eql(u8, &buf, CRLF), "CRLF");
         }
 
         /// Read the next response from the device and interpret as an error or void.
@@ -381,7 +392,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 }
 
                 if (b == CR) {
-                    debug.assert(try self.port.readByte() == LF);
+                    try expect(try self.port.readByte() == LF, "LF after CR");
                     break;
                 }
 
@@ -394,7 +405,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
         fn readProperty(self: *Self, comptime name: []const u8) !void {
             var buf: [name.len + 3]u8 = undefined;
             try self.port.readAll(&buf);
-            debug.assert(mem.eql(u8, &buf, "  " ++ name ++ ":"));
+            try expect(mem.eql(u8, &buf, "  " ++ name ++ ":"), name);
         }
 
         fn readUnsignedHex(self: *Self, comptime T: type) !T {
@@ -407,22 +418,22 @@ pub fn BP35C0Raw(comptime Port: type) type {
         fn readErxudp(self: *Self) !Event.ERXUDP {
             const head = try self.readWord();
             defer self.allocator.free(head);
-            debug.assert(mem.eql(u8, head, "ERXUDP"));
+            try expect(mem.eql(u8, head, "ERXUDP"), "ERXUDP");
 
             const sender = try self.readWord();
             defer self.allocator.free(sender);
-            debug.assert(sender.len == 39);
+            try expect(sender.len == 39, "an IPv6 address as the sender");
 
             const dest = try self.readWord();
             defer self.allocator.free(dest);
-            debug.assert(dest.len == 39);
+            try expect(dest.len == 39, "an IPv6 address as the destination");
 
             const rport = try self.readUnsignedHex(u16);
             const lport = try self.readUnsignedHex(u16);
 
             const sender_lla_raw = try self.readWord();
             defer self.allocator.free(sender_lla_raw);
-            debug.assert(sender_lla_raw.len == 16);
+            try expect(sender_lla_raw.len == 16, "a link local address as the sender");
 
             var sender_lla: [8]u8 = undefined;
             _ = try std.fmt.hexToBytes(&sender_lla, sender_lla_raw);
@@ -464,7 +475,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
         fn readEpandesc(self: *Self) !Event.EPANDESC {
             const head = try self.readLine();
             defer self.allocator.free(head);
-            debug.assert(mem.eql(u8, head, "EPANDESC"));
+            try expect(mem.eql(u8, head, "EPANDESC"), "EPANDESC");
 
             try self.readProperty("Channel");
             const channel = try self.readUnsignedHex(u8);
@@ -478,7 +489,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
             try self.readProperty("Addr");
             const addr_raw = try self.readWord();
             defer self.allocator.free(addr_raw);
-            debug.assert(addr_raw.len == 16);
+            try expect(addr_raw.len == 16, "a link local address as the address");
 
             var addr: [8]u8 = undefined;
             _ = try std.fmt.hexToBytes(&addr, addr_raw);
@@ -492,7 +503,9 @@ pub fn BP35C0Raw(comptime Port: type) type {
             try self.readProperty("PairID");
             const pair_id = try self.readWord();
             defer self.allocator.free(pair_id);
-            debug.assert(addr.len == 8);
+            // This asserted on addr, which is an array and so always of length 8.
+            // The slice below is the one that needs the check.
+            try expect(pair_id.len == 8, "a pair ID of 8 characters");
 
             log.debug("< EPANDESC ( Channel = {X}, Channel Page = {X}, PAN ID = {X}, Addr = {X}, LQI = {X}, Side = {X}, Pair ID = {s} )", .{
                 channel,
@@ -518,7 +531,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
         fn readEvent(self: *Self) !Event.EVENT {
             const head = try self.readWord();
             defer self.allocator.free(head);
-            debug.assert(mem.eql(u8, head, "EVENT"));
+            try expect(mem.eql(u8, head, "EVENT"), "EVENT");
 
             const num = try self.readUnsignedHex(u8);
             const sender = try self.readWord();
@@ -554,7 +567,8 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 return .{ .erxudp = try self.readErxudp() };
             }
 
-            debug.panic("Unsupported event: {s}", .{head});
+            log.warn("Received an unsupported event: {s}", .{head});
+            return error.UnsupportedEvent;
         }
 
         pub fn waitEvent(self: *Self) !Event {
@@ -1080,6 +1094,180 @@ test "readResult - reports a reserved error code" {
     port.feed("FAIL ER01" ++ CRLF);
 
     try t.expectError(error.UnexpectedErrorCode, bp35c0.skreset());
+}
+
+test "readResult - skips the echo of the command" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    // The device echoes the command back when the echo-back is still on.
+    port.feed("SKRESET" ++ CRLF);
+    port.feed("OK" ++ CRLF);
+
+    try bp35c0.skreset();
+    try t.expectEqualStrings("SKRESET" ++ CRLF, port.written());
+}
+
+test "readResult - postpones an event that arrives while waiting" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    // An event may arrive before the result of the command in flight.
+    port.feed(eventResponse("20"));
+    port.feed("OK" ++ CRLF);
+
+    try bp35c0.skreset();
+    try t.expectEqual(1, bp35c0.event_queue.len);
+
+    // The postponed event is handed out before anything is read from the port.
+    const event = try bp35c0.waitEvent();
+    try t.expectEqual(0x20, event.event.num);
+    try t.expectEqual(0, bp35c0.event_queue.len);
+}
+
+test "init - resets the device and turns the echo back off" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    port.feed("OK" ++ CRLF); // SKRESET
+    port.feed("OK" ++ CRLF); // SKSREG SFE
+
+    var bp35c0 = try BP35C0Raw(TestingPort).init(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    try t.expectEqualStrings(
+        "SKRESET" ++ CRLF ++ "SKSREG SFE 0" ++ CRLF,
+        port.written(),
+    );
+}
+
+test "close - terminates the session" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+
+    port.feed("OK" ++ CRLF); // SKTERM
+    bp35c0.close();
+
+    try t.expectEqualStrings("SKTERM" ++ CRLF, port.written());
+}
+
+test "EVENT - reads the parameter of the events that carry one" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    // 0x21 reports the result of a SKSENDTO in its parameter.
+    port.feed("EVENT 21 " ++ remote_ip6_addr ++ " 0 01" ++ CRLF);
+
+    const actual = try bp35c0.readEvent();
+    try t.expectEqual(0x21, actual.num);
+    try t.expectEqual(1, actual.param);
+}
+
+test "waitNewEvent - reports an event it does not know" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    port.feed("ERXUDPX " ++ remote_ip6_addr ++ CRLF);
+
+    try t.expectError(error.UnsupportedEvent, bp35c0.waitNewEvent());
+}
+
+test "ERXUDP - reports a malformed sender" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    port.feed("ERXUDP FE80:0000:1234 " ++ CRLF);
+
+    try t.expectError(error.UnexpectedResponse, bp35c0.readErxudp());
+}
+
+test "EPANDESC - reports a malformed property name" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    port.feed("EPANDESC" ++ CRLF ++ "  Chennel:21" ++ CRLF);
+
+    try t.expectError(error.UnexpectedResponse, bp35c0.readEpandesc());
+}
+
+test "EPANDESC - reports a truncated pair ID" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    // The pair ID is sliced to 8 bytes, so a shorter one used to read
+    // out of bounds.
+    port.feed("EPANDESC" ++ CRLF ++
+        "  Channel:21" ++ CRLF ++
+        "  Channel Page:09" ++ CRLF ++
+        "  Pan ID:8888" ++ CRLF ++
+        "  Addr:12345678ABCDEF01" ++ CRLF ++
+        "  LQI:E1" ++ CRLF ++
+        "  Side:0" ++ CRLF ++
+        "  PairID:AABB" ++ CRLF);
+
+    try t.expectError(error.UnexpectedResponse, bp35c0.readEpandesc());
+}
+
+test "SKSENDTO - reports a response that does not start with CRLF" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    port.feed("XXOK" ++ CRLF);
+
+    try t.expectError(error.UnexpectedResponse, bp35c0.sksendto(
+        1,
+        "\xFE\x80\x00\x00\x00\x00\x00\x00\x02\x1D\x12\x90\x12\x34\x56\x78".*,
+        3610,
+        .encrypted,
+        .B,
+        "12345",
+    ));
 }
 
 const epandesc_response =
