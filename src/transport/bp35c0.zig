@@ -250,6 +250,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 if (mem.eql(u8, &buf, "FAIL")) {
                     _ = try reader.readByte();
                     _ = try reader.read(&buf);
+                    _ = try self.readCRLF();
 
                     inline for (@typeInfo(ErrorCode).@"enum".fields) |f| {
                         if (mem.eql(u8, &buf, f.name)) {
@@ -271,7 +272,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 }
 
                 if (mem.startsWith(u8, &buf, "SK")) {
-                    _ = try self.readLine();
+                    self.allocator.free(try self.readLine());
                     continue;
                 }
 
@@ -285,7 +286,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                     continue;
                 }
 
-                log.debug("Received an unexpected response: {s}", .{&buf});
+                log.debug("Received an unexpected response: {any}", .{&buf});
             }
         }
 
@@ -357,10 +358,11 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 data.len,
             });
             try self.port.writer().writeAll(data);
-            try self.port.writer().writeAll(CRLF);
 
             log.debug("> {}", .{std.fmt.fmtSliceHexUpper(data)});
 
+            // Unlike other commands, the response to SKSENDTO starts with CRLF.
+            try self.readCRLF();
             return try self.readResult();
         }
 
@@ -525,10 +527,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
             const sender = try self.readWord();
             defer self.allocator.free(sender);
             const side = try self.readUnsignedHex(u8);
-            const param = if (num == 0x21 or num == 0x45) try self.readUnsignedHex(u8) else blk: {
-                _ = try self.readCRLF();
-                break :blk null;
-            };
+            const param = if (num == 0x21 or num == 0x45) try self.readUnsignedHex(u8) else null;
 
             log.debug("< EVENT {X} {s} {X} {?X}", .{num, sender, side, param});
 
@@ -888,7 +887,7 @@ test "SKSENDTO" {
     var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
     defer port.deinit();
 
-    @memcpy(port.rx.buffer[0..4], "OK\r\n");
+    @memcpy(port.rx.buffer[0..6], "\r\nOK\r\n");
     try bp35c0.sksendto(
         1,
         "\xFE\x80\x00\x00\x00\x00\x00\x00\x02\x1D\x12\x90\x12\x34\x56\x78".*,
@@ -898,8 +897,8 @@ test "SKSENDTO" {
         "12345",
     );
     try t.expectEqualStrings(
-        "SKSENDTO 1 FE80:0000:0000:0000:021D:1290:1234:5678 0E1A 1 0 0005 12345\r\n",
-        port.tx.buffer[0..72],
+        "SKSENDTO 1 FE80:0000:0000:0000:021D:1290:1234:5678 0E1A 1 0 0005 12345",
+        port.tx.buffer[0..70],
     );
 }
 
