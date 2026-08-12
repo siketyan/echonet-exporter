@@ -37,3 +37,43 @@ jobs:
 
       - name: Test
         run: zig build test
+
+  build-release:
+    name: Build release (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: aarch64-macos
+            runner: macos-latest
+          # No native Intel runner is needed: Zig cross-compiles this from the arm64 macOS runner.
+          - target: x86_64-macos
+            runner: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Zig
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: 0.16.0
+
+      - name: Build
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: echonet-exporter-${{ matrix.target }}
+          path: zig-out/bin/echonet-exporter
+          if-no-files-found: error
