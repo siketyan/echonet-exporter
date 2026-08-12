@@ -1,12 +1,13 @@
 const std = @import("std");
 const debug = std.debug;
-const fs = std.fs;
+const Io = std.Io;
 const mem = std.mem;
 
 const yaml = @import("yaml");
+const ArrayList = std.array_list.Managed;
 
 pub const String = struct {
-    list: std.ArrayList(u8),
+    list: ArrayList(u8),
 
     pub fn deinit(self: String) void {
         self.list.deinit();
@@ -17,7 +18,7 @@ pub const String = struct {
     }
 
     pub fn fromSlice(allocator: mem.Allocator, slice: []const u8) !String {
-        var list = try std.ArrayList(u8).initCapacity(allocator, slice.len);
+        var list = try ArrayList(u8).initCapacity(allocator, slice.len);
         list.appendSliceAssumeCapacity(slice);
 
         return String{ .list = list };
@@ -25,12 +26,12 @@ pub const String = struct {
 };
 
 fn parseString(value: yaml.Yaml.Value, allocator: mem.Allocator) !String {
-    return try String.fromSlice(allocator, try value.asScalar());
+    return try String.fromSlice(allocator, value.asScalar() orelse return error.TypeMismatch);
 }
 
-fn parseArrayList(comptime T: type, value: yaml.Yaml.Value, allocator: mem.Allocator) !std.ArrayList(T) {
-    const value_list = try value.asList();
-    var list = try std.ArrayList(T).initCapacity(allocator, value_list.len);
+fn parseArrayList(comptime T: type, value: yaml.Yaml.Value, allocator: mem.Allocator) !ArrayList(T) {
+    const value_list = value.asList() orelse return error.TypeMismatch;
+    var list = try ArrayList(T).initCapacity(allocator, value_list.len);
     for (value_list) |v| {
         var item: T = undefined;
         try item.parseYamlAlloc(v, allocator);
@@ -51,15 +52,15 @@ fn parseOptional(comptime T: type, value: ?yaml.Yaml.Value, allocator: mem.Alloc
 }
 
 fn parseEnum(comptime T: type, value: yaml.Yaml.Value) !T {
-    const str = try value.asScalar();
-    return inline for (@typeInfo(Type).@"enum".fields) |f| {
+    const str = value.asScalar() orelse return error.TypeMismatch;
+    return inline for (@typeInfo(T).@"enum".fields) |f| {
         if (mem.eql(u8, f.name, str)) {
             break @enumFromInt(f.value);
         }
     } else error.InvalidEnumValue;
 }
 
-fn deinitAll(comptime T: type, list: std.ArrayList(T)) void {
+fn deinitAll(comptime T: type, list: ArrayList(T)) void {
     for (list.items) |item| {
         item.deinit();
     }
@@ -77,7 +78,7 @@ pub const Credentials = struct {
     }
 
     pub fn parseYamlAlloc(self: *Credentials, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
-        const map = try value.asMap();
+        const map = value.asMap() orelse return error.TypeMismatch;
 
         self.rbid = try parseString(map.get("rbid").?, allocator);
         self.pwd = try parseString(map.get("pwd").?, allocator);
@@ -90,11 +91,11 @@ pub const Target = struct {
     instance_code: u8,
 
     pub fn parseYaml(self: *Target, value: yaml.Yaml.Value) !void {
-        const map = try value.asMap();
+        const map = value.asMap() orelse return error.TypeMismatch;
 
-        self.class_group_code = try std.fmt.parseInt(u8, try map.get("class_group_code").?.asScalar(), 0);
-        self.class_code = try std.fmt.parseInt(u8, try map.get("class_code").?.asScalar(), 0);
-        self.instance_code = try std.fmt.parseInt(u8, try map.get("instance_code").?.asScalar(), 0);
+        self.class_group_code = try std.fmt.parseInt(u8, map.get("class_group_code").?.asScalar() orelse return error.TypeMismatch, 0);
+        self.class_code = try std.fmt.parseInt(u8, map.get("class_code").?.asScalar() orelse return error.TypeMismatch, 0);
+        self.instance_code = try std.fmt.parseInt(u8, map.get("instance_code").?.asScalar() orelse return error.TypeMismatch, 0);
     }
 };
 
@@ -117,10 +118,10 @@ pub const Measure = struct {
     }
 
     pub fn parseYamlAlloc(self: *Measure, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
-        const map = try value.asMap();
+        const map = value.asMap() orelse return error.TypeMismatch;
 
-        self.name = try String.fromSlice(allocator, try map.get("name").?.asScalar());
-        self.help = if (map.get("help")) |v| try String.fromSlice(allocator, try v.asScalar()) else null;
+        self.name = try String.fromSlice(allocator, map.get("name").?.asScalar() orelse return error.TypeMismatch);
+        self.help = if (map.get("help")) |v| try String.fromSlice(allocator, v.asScalar() orelse return error.TypeMismatch) else null;
     }
 };
 
@@ -133,7 +134,7 @@ pub const Layout = struct {
     }
 
     pub fn parseYamlAlloc(self: *Layout, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
-        const map = try value.asMap();
+        const map = value.asMap() orelse return error.TypeMismatch;
 
         self.type = try parseEnum(Type, map.get("type").?);
         self.name = try parseString(map.get("name").?, allocator);
@@ -142,27 +143,27 @@ pub const Layout = struct {
 
 pub const Property = struct {
     epc: u8,
-    layout: std.ArrayList(Layout),
+    layout: ArrayList(Layout),
 
     pub fn deinit(self: Property) void {
         deinitAll(Layout, self.layout);
     }
 
     pub fn parseYamlAlloc(self: *Property, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
-        const map = try value.asMap();
+        const map = value.asMap() orelse return error.TypeMismatch;
 
-        self.epc = try std.fmt.parseInt(u8, try map.get("epc").?.asScalar(), 0);
+        self.epc = try std.fmt.parseInt(u8, map.get("epc").?.asScalar() orelse return error.TypeMismatch, 0);
         self.layout = try parseArrayList(Layout, map.get("layout").?, allocator);
     }
 };
 
 pub const Config = struct {
-    address: std.net.Address,
+    address: Io.net.IpAddress,
     device: String,
     credentials: ?Credentials = null,
     target: Target,
-    measures: std.ArrayList(Measure),
-    properties: std.ArrayList(Property),
+    measures: ArrayList(Measure),
+    properties: ArrayList(Property),
 
     pub fn deinit(self: Config) void {
         self.device.deinit();
@@ -172,15 +173,15 @@ pub const Config = struct {
     }
 
     pub fn parseYamlAlloc(self: *Config, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
-        const map = try value.asMap();
+        const map = value.asMap() orelse return error.TypeMismatch;
 
-        var addr = mem.splitSequence(u8, try map.get("address").?.asScalar(), ":");
-        self.address = try std.net.Address.parseIp(
+        var addr = mem.splitSequence(u8, map.get("address").?.asScalar() orelse return error.TypeMismatch, ":");
+        self.address = try Io.net.IpAddress.parse(
             addr.next().?,
             try std.fmt.parseUnsigned(u16, addr.next().?, 10),
         );
 
-        self.device = try String.fromSlice(allocator, try map.get("device").?.asScalar());
+        self.device = try String.fromSlice(allocator, map.get("device").?.asScalar() orelse return error.TypeMismatch);
         self.credentials = try parseOptional(Credentials, map.get("credentials"), allocator);
         try self.target.parseYaml(map.get("target").?);
         self.measures = try parseArrayList(Measure, map.get("measures").?, allocator);
@@ -198,19 +199,16 @@ pub const Config = struct {
         return config;
     }
 
-    pub fn loadYamlFileAlloc(path: []const u8, alloc: mem.Allocator) !Config {
-        const fd = try fs.cwd().openFile(path, .{ .mode = .read_only });
-        defer fd.close();
-
-        const buf = try fd.readToEndAlloc(alloc, 4096);
+    pub fn loadYamlFileAlloc(path: []const u8, alloc: mem.Allocator, io: Io) !Config {
+        const buf = try Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(4096));
         defer alloc.free(buf);
 
         return try Config.loadYamlAlloc(buf, alloc);
     }
 };
 
-fn listFromSlice(comptime T: type, allocator: mem.Allocator, slice: []const T) !std.ArrayList(T) {
-    var list = try std.ArrayList(T).initCapacity(allocator, slice.len);
+fn listFromSlice(comptime T: type, allocator: mem.Allocator, slice: []const T) !ArrayList(T) {
+    var list = try ArrayList(T).initCapacity(allocator, slice.len);
     list.appendSliceAssumeCapacity(slice);
 
     return list;
@@ -243,7 +241,7 @@ test "load config" {
     defer actual.deinit();
 
     const expected = Config{
-        .address = try std.net.Address.parseIp("0.0.0.0", 9100),
+        .address = try Io.net.IpAddress.parse("0.0.0.0", 9100),
         .device = try String.fromSlice(t.allocator, "/dev/ttyUSB0"),
         .credentials = .{
             .rbid = try String.fromSlice(t.allocator, "0123456789ABCDEF"),
@@ -268,7 +266,7 @@ test "load config" {
     };
     defer expected.deinit();
 
-    try t.expect(actual.address.eql(expected.address));
+    try t.expect(actual.address.eql(&expected.address));
     try t.expectEqualDeep(expected.device, actual.device);
     try t.expectEqualDeep(expected.credentials, actual.credentials);
     try t.expectEqualDeep(expected.target, actual.target);

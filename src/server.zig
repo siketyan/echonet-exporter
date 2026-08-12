@@ -1,9 +1,9 @@
 const std = @import("std");
 const http = std.http;
-const io = std.io;
+const Io = std.Io;
 const log = std.log.scoped(.server);
 const mem = std.mem;
-const net = std.net;
+const net = Io.net;
 
 const config = @import("./config.zig");
 const echonet = @import("./echonet.zig");
@@ -11,15 +11,12 @@ const util = @import("./util.zig");
 
 const TransactionManager = @import("./transaction.zig").TransactionManager;
 
-fn fmtAddress(addr: net.Address) std.fmt.Formatter(net.Address.format) {
-    return std.fmt.Formatter(net.Address.format){ .data = addr };
-}
-
 pub fn Server(comptime Controller: type) type {
     return struct {
         const Self = @This();
 
         allocator: mem.Allocator,
+        io: Io,
         conf: config.Config,
         txm: *TransactionManager,
         controller: *const Controller,
@@ -28,12 +25,14 @@ pub fn Server(comptime Controller: type) type {
 
         pub fn init(
             allocator: mem.Allocator,
+            io: Io,
             conf: config.Config,
             txm: *TransactionManager,
             controller: *const Controller,
         ) Self {
             return Self{
                 .allocator = allocator,
+                .io = io,
                 .conf = conf,
                 .txm = txm,
                 .controller = controller,
@@ -42,26 +41,29 @@ pub fn Server(comptime Controller: type) type {
 
         pub fn run(self: *Self) !void {
             const addr = self.conf.address;
-            var server = try addr.listen(.{
+            var server = try addr.listen(self.io, .{
                 .reuse_address = true,
             });
+            defer server.deinit(self.io);
 
-            log.info("HTTP server is ready at {}", .{fmtAddress(addr)});
+            log.info("HTTP server is ready at {f}", .{addr});
 
             while (true) {
-                const conn = try server.accept();
-                defer conn.stream.close();
+                var conn = try server.accept(self.io);
+                defer conn.close(self.io);
 
-                log.info("A new connection from {} has been accepted", .{fmtAddress(conn.address)});
+                log.info("A new connection has been accepted", .{});
 
                 try self.handleConnection(conn);
             }
         }
 
-        fn handleConnection(self: *Self, conn: net.Server.Connection) !void {
-            var http_server = http.Server.init(conn, &self.rx_buf);
-            while (http_server.state == .ready) {
-                var request = http_server.receiveHead() catch continue;
+        fn handleConnection(self: *Self, conn: net.Stream) !void {
+            var reader = conn.reader(self.io, &self.rx_buf);
+            var writer = conn.writer(self.io, &self.tx_buf);
+            var http_server = http.Server.init(&reader.interface, &writer.interface);
+            while (true) {
+                var request = http_server.receiveHead() catch return;
 
                 log.info("{s} {s} {s}", .{
                     @tagName(request.head.version),
@@ -122,24 +124,22 @@ pub fn Server(comptime Controller: type) type {
             };
             defer resp.deinit();
 
-            var body = std.ArrayList(u8).init(self.allocator);
+            var body: Io.Writer.Allocating = .init(self.allocator);
             defer body.deinit();
-            const writer = body.writer();
+            const writer = &body.writer;
 
             for (self.conf.properties.items) |property| {
-
-                const edt: std.ArrayList(u8) = for (resp.format1.edata.props.asSlice()) |p| {
+                const edt = for (resp.format1.edata.props.asSlice()) |p| {
                     if (p.epc == property.epc) {
                         if (p.edt) |edt| break edt;
                     }
                 } else continue;
 
-                var stream = io.fixedBufferStream(edt.items);
-                const reader = stream.reader();
+                var reader = Io.Reader.fixed(edt.items);
 
                 for (property.layout.items) |layout| {
                     const name = layout.name.asSlice();
-                    try std.fmt.format(writer, "# TYPE {s} gauge\n", .{name});
+                    try writer.print("# TYPE {s} gauge\n", .{name});
 
                     const measure: ?config.Measure = for (self.conf.measures.items) |m| {
                         if (mem.eql(u8, m.name.asSlice(), layout.name.asSlice())) {
@@ -149,7 +149,7 @@ pub fn Server(comptime Controller: type) type {
 
                     if (measure) |m| {
                         if (m.help) |help| {
-                            try std.fmt.format(writer, "# HELP {s} {s}\n", .{ name, help.asSlice() });
+                            try writer.print("# HELP {s} {s}\n", .{ name, help.asSlice() });
                         }
                     }
 
@@ -157,19 +157,19 @@ pub fn Server(comptime Controller: type) type {
                     try writer.writeByte(' ');
 
                     try switch (layout.type) {
-                        .signed_char => std.fmt.formatIntValue(try reader.readInt(i8, .big), "d", .{}, writer),
-                        .signed_short => std.fmt.formatIntValue(try reader.readInt(i16, .big), "d", .{}, writer),
-                        .signed_long => std.fmt.formatIntValue(try reader.readInt(i32, .big), "d", .{}, writer),
-                        .unsigned_char => std.fmt.formatIntValue(try reader.readInt(u8, .big), "d", .{}, writer),
-                        .unsigned_short => std.fmt.formatIntValue(try reader.readInt(u16, .big), "d", .{}, writer),
-                        .unsigned_long => std.fmt.formatIntValue(try reader.readInt(u32, .big), "d", .{}, writer),
+                        .signed_char => writer.print("{d}", .{try reader.takeInt(i8, .big)}),
+                        .signed_short => writer.print("{d}", .{try reader.takeInt(i16, .big)}),
+                        .signed_long => writer.print("{d}", .{try reader.takeInt(i32, .big)}),
+                        .unsigned_char => writer.print("{d}", .{try reader.takeInt(u8, .big)}),
+                        .unsigned_short => writer.print("{d}", .{try reader.takeInt(u16, .big)}),
+                        .unsigned_long => writer.print("{d}", .{try reader.takeInt(u32, .big)}),
                     };
 
                     try writer.writeByte('\n');
                 }
             }
 
-            try request.respond(body.items, .{
+            try request.respond(body.writer.buffered(), .{
                 .extra_headers = &.{
                     .{ .name = "Content-Type", .value = "text/plain; version=0.0.4" },
                 },
@@ -183,11 +183,8 @@ pub fn Server(comptime Controller: type) type {
 test "handleRequest" {
     const t = std.testing;
 
-    var tmp_dir = t.tmpDir(.{});
-    defer tmp_dir.cleanup();
-
     const conf: config.Config = .{
-        .address = try net.Address.parseIp("127.0.0.1", 12345),
+        .address = try net.IpAddress.parse("127.0.0.1", 12345),
         .device = try config.String.fromSlice(t.allocator, "/dev/ttyUSB0"),
         .target = .{
             .class_group_code = 0x02,
@@ -249,13 +246,10 @@ test "handleRequest" {
         }
     }{};
 
-    const fd = try tmp_dir.dir.createFile("dummy.sock", .{ .read = true });
-    defer fd.close();
-
-    var http_server = http.Server.init(.{
-        .address = conf.address,
-        .stream = .{ .handle = fd.handle },
-    }, &.{});
+    var input = Io.Reader.fixed(&.{});
+    var output_buffer: [1024]u8 = undefined;
+    var output = Io.Writer.fixed(&output_buffer);
+    var http_server = http.Server.init(&input, &output);
 
     var request: http.Server.Request = .{
         .server = &http_server,
@@ -269,24 +263,21 @@ test "handleRequest" {
             .transfer_encoding = .none,
             .transfer_compression = .identity,
             .keep_alive = false,
-            .compression = .none,
         },
-        .head_end = undefined,
-        .reader_state = undefined,
+        .head_buffer = &.{},
     };
 
     var txm = TransactionManager.init();
     var server = Server(@TypeOf(controller)){
         .allocator = t.allocator,
+        .io = t.io,
         .conf = conf,
         .txm = &txm,
         .controller = &controller,
     };
     try server.handleRequest(&request);
 
-    try fd.seekTo(0);
-    const bytes = try fd.readToEndAlloc(t.allocator, 1024);
-    defer t.allocator.free(bytes);
+    const bytes = output.buffered();
 
     const expected_header_lf =
         \\HTTP/1.1 200 OK

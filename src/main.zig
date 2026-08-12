@@ -1,10 +1,5 @@
 const std = @import("std");
-const fs = std.fs;
-const http = std.http;
-const io = std.io;
 const log = std.log;
-const mem = std.mem;
-const net = std.net;
 
 const config = @import("./config.zig");
 const echonet = @import("./echonet.zig");
@@ -28,12 +23,10 @@ pub const std_options: std.Options = .{
     },
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer std.debug.assert(gpa.deinit() == .ok);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
-    const conf = try config.Config.loadYamlFileAlloc("config.yaml", allocator);
+    const conf = try config.Config.loadYamlFileAlloc("config.yaml", allocator, init.io);
     defer conf.deinit();
 
     // var pcap_fd = try fs.cwd().createFile("test.pcap", .{});
@@ -41,7 +34,7 @@ pub fn main() !void {
 
     // try writer.writeFileHeader();
 
-    var port = try SerialPort.open(conf.device.asSlice(), 115_200, allocator);
+    var port = try SerialPort.open(conf.device.asSlice(), 115_200, allocator, init.io);
     defer port.close();
 
     var bp35c0 = try BP35C0.init(&port, allocator, .{
@@ -61,7 +54,7 @@ pub fn main() !void {
         // .writer = &writer,
     };
 
-    var server = Server.init(allocator, conf, &txm, &controller);
+    var server = Server.init(allocator, init.io, conf, &txm, &controller);
 
     try server.run();
 }

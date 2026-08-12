@@ -1,7 +1,8 @@
 const std = @import("std");
 const debug = std.debug;
-const io = std.io;
+const io = std.Io;
 const mem = std.mem;
+const ArrayList = std.array_list.Managed;
 
 pub const EOJ = struct {
     /// Class group code
@@ -11,13 +12,13 @@ pub const EOJ = struct {
     /// Instance code
     instance_code: u8,
 
-    pub fn read(self: *EOJ, reader: io.AnyReader) !void {
-        self.class_group_code = try reader.readByte();
-        self.class_code = try reader.readByte();
-        self.instance_code = try reader.readByte();
+    pub fn read(self: *EOJ, reader: *io.Reader) !void {
+        self.class_group_code = try reader.takeByte();
+        self.class_code = try reader.takeByte();
+        self.instance_code = try reader.takeByte();
     }
 
-    pub fn write(self: EOJ, writer: io.AnyWriter) !void {
+    pub fn write(self: EOJ, writer: *io.Writer) !void {
         try writer.writeByte(self.class_group_code);
         try writer.writeByte(self.class_code);
         try writer.writeByte(self.instance_code);
@@ -32,7 +33,7 @@ pub const Property = struct {
     /// ECHONET Lite Property (EPC)
     epc: u8,
     /// Property value data (EDT)
-    edt: ?std.ArrayList(u8) = null,
+    edt: ?ArrayList(u8) = null,
 
     pub fn deinit(self: Property) void {
         if (self.edt) |edt| edt.deinit();
@@ -47,20 +48,20 @@ pub const Property = struct {
         return cloned;
     }
 
-    pub fn readAlloc(self: *Property, reader: io.AnyReader, allocator: mem.Allocator) !void {
-        self.epc = try reader.readByte();
+    pub fn readAlloc(self: *Property, reader: *io.Reader, allocator: mem.Allocator) !void {
+        self.epc = try reader.takeByte();
 
-        const pdc = try reader.readByte();
+        const pdc = try reader.takeByte();
         if (pdc > 0) {
             const edt = try allocator.alloc(u8, pdc);
-            debug.assert(try reader.readAll(edt) == pdc);
-            self.edt = std.ArrayList(u8).fromOwnedSlice(allocator, edt);
+            try reader.readSliceAll(edt);
+            self.edt = ArrayList(u8).fromOwnedSlice(allocator, edt);
         } else {
             self.edt = null;
         }
     }
 
-    pub fn write(self: Property, writer: io.AnyWriter) !void {
+    pub fn write(self: Property, writer: *io.Writer) !void {
         try writer.writeByte(self.epc);
         if (self.edt) |edt| {
             try writer.writeByte(@intCast(edt.items.len)); // PDC
@@ -77,7 +78,7 @@ pub const Property = struct {
 
 pub const PropertyList = struct {
     const Self = @This();
-    const List = std.ArrayList(Property);
+    const List = ArrayList(Property);
 
     list: List,
 
@@ -141,13 +142,13 @@ pub const EDATA = struct {
         return cloned;
     }
 
-    pub fn readAlloc(self: *EDATA, reader: io.AnyReader, allocator: mem.Allocator) !void {
+    pub fn readAlloc(self: *EDATA, reader: *io.Reader, allocator: mem.Allocator) !void {
         try self.seoj.read(reader);
         try self.deoj.read(reader);
 
-        self.esv = try reader.readByte();
+        self.esv = try reader.takeByte();
 
-        const opc = try reader.readByte();
+        const opc = try reader.takeByte();
         const props = try allocator.alloc(Property, opc);
         for (0..opc) |i| {
             try props[i].readAlloc(reader, allocator);
@@ -155,7 +156,7 @@ pub const EDATA = struct {
         self.props = PropertyList.fromOwnedSlice(allocator, props);
     }
 
-    pub fn write(self: EDATA, writer: io.AnyWriter) !void {
+    pub fn write(self: EDATA, writer: *io.Writer) !void {
         try self.seoj.write(writer);
         try self.deoj.write(writer);
         try writer.writeByte(self.esv);
@@ -218,27 +219,27 @@ pub const Frame = union(enum) {
         };
     }
 
-    pub fn readAlloc(self: *Frame, reader: io.AnyReader, alloc: mem.Allocator) !void {
-        const ehd1 = try reader.readByte();
+    pub fn readAlloc(self: *Frame, reader: *io.Reader, alloc: mem.Allocator) !void {
+        const ehd1 = try reader.takeByte();
         debug.assert(ehd1 == 0x10);
 
-        const ehd2 = try reader.readByte();
+        const ehd2 = try reader.takeByte();
         switch (ehd2) {
             0x81 => {
                 self.* = .{ .format1 = undefined };
-                self.format1.tid = try reader.readInt(u16, .big);
+                self.format1.tid = try reader.takeInt(u16, .big);
                 try self.format1.edata.readAlloc(reader, alloc);
             },
             0x82 => {
                 self.* = .{ .format2 = undefined };
-                self.format2.tid = try reader.readInt(u16, .big);
-                _ = try reader.readAll(self.format2.edata);
+                self.format2.tid = try reader.takeInt(u16, .big);
+                try reader.readSliceAll(self.format2.edata);
             },
             else => debug.panic("unexpected EHD2: 0x{X:0>2}", .{ehd2}),
         }
     }
 
-    pub fn write(self: Frame, writer: io.AnyWriter) !void {
+    pub fn write(self: Frame, writer: *io.Writer) !void {
         try writer.writeByte(0x10); // EHD1
 
         switch (self) {
@@ -256,10 +257,11 @@ pub const Frame = union(enum) {
     }
 
     pub fn toBytesAlloc(self: Frame, alloc: mem.Allocator) ![]u8 {
-        var stream = io.fixedBufferStream(try alloc.alloc(u8, self.len()));
-        try self.write(stream.writer().any());
-
-        return stream.getWritten();
+        const bytes = try alloc.alloc(u8, self.len());
+        var writer = io.Writer.fixed(bytes);
+        try self.write(&writer);
+        debug.assert(writer.end == bytes.len);
+        return bytes;
     }
 
     pub fn len(self: Frame) usize {
@@ -281,10 +283,10 @@ pub const Frame = union(enum) {
 test "reading from bytes - format 1" {
     const t = std.testing;
 
-    var stream = io.fixedBufferStream("\x10\x81\x12\x34\x05\xFF\x01\x02\x88\x01\x62\x02\xE7\x00\xE8\x00");
+    var reader = io.Reader.fixed("\x10\x81\x12\x34\x05\xFF\x01\x02\x88\x01\x62\x02\xE7\x00\xE8\x00");
 
     var frame: Frame = undefined;
-    try frame.readAlloc(stream.reader().any(), t.allocator);
+    try frame.readAlloc(&reader, t.allocator);
     defer frame.deinit();
 
     const expected = Frame{

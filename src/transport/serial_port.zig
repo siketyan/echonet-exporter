@@ -1,7 +1,5 @@
 const std = @import("std");
-const fifo = std.fifo;
-const fs = std.fs;
-const io = std.io;
+const Io = std.Io;
 const log = std.log.scoped(.serial_port);
 const mem = std.mem;
 
@@ -13,18 +11,22 @@ const serial = @import("serial");
 pub const SerialPort = struct {
     const Self = @This();
 
-    fd: fs.File,
-    fifo: fifo.LinearFifo(u8, .Dynamic),
+    fd: Io.File,
+    io: Io,
+    fifo: std.Deque(u8),
+    allocator: mem.Allocator,
 
-    fn init(fd: fs.File, allocator: mem.Allocator) Self {
+    fn init(fd: Io.File, io: Io, allocator: mem.Allocator) Self {
         return Self{
             .fd = fd,
-            .fifo = fifo.LinearFifo(u8, .Dynamic).init(allocator),
+            .io = io,
+            .fifo = .empty,
+            .allocator = allocator,
         };
     }
 
-    pub fn open(path: []const u8, baud_rate: u32, allocator: mem.Allocator) !Self {
-        const fd = try fs.cwd().openFile(path, .{ .mode = .read_write });
+    pub fn open(path: []const u8, baud_rate: u32, allocator: mem.Allocator, io: Io) !Self {
+        const fd = try Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
 
         try serial.configureSerialPort(fd, serial.SerialConfig{
             .baud_rate = baud_rate,
@@ -32,12 +34,12 @@ pub const SerialPort = struct {
 
         log.debug("The serial port {s} has been configured for baud rate {d}", .{ path, baud_rate });
 
-        return init(fd, allocator);
+        return init(fd, io, allocator);
     }
 
-    pub fn close(self: Self) void {
-        self.fifo.deinit();
-        self.fd.close();
+    pub fn close(self: *Self) void {
+        self.fifo.deinit(self.allocator);
+        self.fd.close(self.io);
 
         log.debug("The serial port has been closed successfully", .{});
     }
@@ -71,34 +73,49 @@ pub const SerialPort = struct {
         };
     }
 
-    pub const ReadError = fs.File.ReadError;
-    pub const Reader = io.Reader(*Self, ReadError, read);
+    pub const ReadError = Io.File.ReadStreamingError;
 
     pub fn read(self: *Self, buf: []u8) ReadError!usize {
-        const fifo_len = self.fifo.read(buf);
+        var fifo_len: usize = 0;
+        while (fifo_len < buf.len) : (fifo_len += 1) {
+            buf[fifo_len] = self.fifo.popFront() orelse break;
+        }
         if (fifo_len == buf.len) {
             log.debug("Read {d} bytes from the FIFO buffer and the buffer is already filled", .{fifo_len});
 
             return fifo_len;
         }
 
-        const raw_len = try self.fd.read(buf[fifo_len..]);
+        const raw_len = self.fd.readStreaming(self.io, &.{buf[fifo_len..]}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => return err,
+        };
 
         log.debug("Read {d} bytes from the FIFO buffer and {d} bytes from the port", .{ fifo_len, raw_len });
 
         return fifo_len + raw_len;
     }
 
-    /// Create a `io.Reader` for the serial port with peeking support.
-    pub fn reader(self: *Self) Reader {
-        return .{ .context = self };
+    pub fn readAll(self: *Self, buf: []u8) ReadError!void {
+        var offset: usize = 0;
+        while (offset < buf.len) {
+            const len = try self.read(buf[offset..]);
+            if (len == 0) return error.EndOfStream;
+            offset += len;
+        }
+    }
+
+    pub fn readByte(self: *Self) ReadError!u8 {
+        var buf: [1]u8 = undefined;
+        try self.readAll(&buf);
+        return buf[0];
     }
 
     pub const PutBackError = error{OutOfMemory};
 
     /// Put the buffer back to the stream so we can read it again.
     pub fn putBack(self: *Self, buf: []const u8) PutBackError!void {
-        try self.fifo.unget(buf);
+        try self.fifo.pushFrontSlice(self.allocator, buf);
 
         log.debug("Put back {d} bytes to the FIFO buffer", .{buf.len});
     }
@@ -109,31 +126,40 @@ pub const SerialPort = struct {
     pub fn peek(self: *Self, buf: []u8) PeekError!usize {
         const len = try self.read(buf);
         if (len > 0) {
-            try self.putBack(buf);
+            try self.putBack(buf[0..len]);
         }
 
         return len;
     }
 
-    pub const WriteError = fs.File.WriteError;
-    pub const Writer = fs.File.Writer;
+    pub const WriteError = Io.File.Writer.Error;
 
-    /// Create a `io.Writer` for the serial port.
-    pub fn writer(self: *Self) Writer {
-        return self.fd.writer();
+    pub fn writeAll(self: *Self, bytes: []const u8) WriteError!void {
+        return self.fd.writeStreamingAll(self.io, bytes);
+    }
+
+    pub fn print(self: *Self, comptime fmt: []const u8, args: anytype) WriteError!void {
+        var buffer: [256]u8 = undefined;
+        var writer = self.fd.writer(self.io, &buffer);
+        writer.interface.print(fmt, args) catch return writer.err.?;
+        writer.interface.flush() catch return writer.err.?;
     }
 };
 
 test {
     const t = std.testing;
 
-    const tmp_dir = t.tmpDir(.{});
-    const fd = try tmp_dir.dir.createFile("serial_port.dat", .{ .read = true });
-    var port = SerialPort.init(fd, t.allocator);
-    defer port.close();
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
 
-    try port.writer().writeAll("Hello, world!");
-    try fd.seekTo(0);
+    const write_fd = try tmp_dir.dir.createFile(t.io, "serial_port.dat", .{ .read = true });
+    var write_port = SerialPort.init(write_fd, t.io, t.allocator);
+    try write_port.writeAll("Hello, world!");
+    write_port.close();
+
+    const read_fd = try tmp_dir.dir.openFile(t.io, "serial_port.dat", .{ .mode = .read_write });
+    var port = SerialPort.init(read_fd, t.io, t.allocator);
+    defer port.close();
 
     var buf: [5]u8 = undefined;
     var len = try port.read(&buf);

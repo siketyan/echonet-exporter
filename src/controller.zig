@@ -1,5 +1,5 @@
 const std = @import("std");
-const io = std.io;
+const io = std.Io;
 const log = std.log.scoped(.controller);
 const mem = std.mem;
 
@@ -38,10 +38,10 @@ pub fn Controller(comptime Transport: type) type {
                 //
                 // try state.writer.writeRecord(.{}, try ip6.toBytesAlloc(state.allocator));
 
-                var stream = io.fixedBufferStream(data);
+                var reader = io.Reader.fixed(data);
 
                 var resp: echonet.Frame = undefined;
-                try resp.readAlloc(stream.reader().any(), self.allocator);
+                try resp.readAlloc(&reader, self.allocator);
                 defer resp.deinit();
 
                 if (resp.getTID() != req.getTID()) {

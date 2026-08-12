@@ -1,6 +1,7 @@
 const std = @import("std");
 const debug = std.debug;
-const io = std.io;
+const Io = std.Io;
+const ArrayList = std.array_list.Managed;
 const log = std.log.scoped(.bp35c0);
 const mem = std.mem;
 
@@ -135,35 +136,35 @@ pub const Event = union(enum) {
     }
 };
 
-fn formatIp6Addr(data: [16]u8, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-    if (fmt.len != 0) std.fmt.invalidFmtError(fmt, data);
-    _ = options;
+const Ip6AddrFormatter = struct {
+    data: [16]u8,
 
-    try std.fmt.format(
-        writer,
-        "{X:0>4}:{X:0>4}:{X:0>4}:{X:0>4}:{X:0>4}:{X:0>4}:{X:0>4}:{X:0>4}",
-        .{
-            std.fmt.fmtSliceHexUpper(data[0..2]),
-            std.fmt.fmtSliceHexUpper(data[2..4]),
-            std.fmt.fmtSliceHexUpper(data[4..6]),
-            std.fmt.fmtSliceHexUpper(data[6..8]),
-            std.fmt.fmtSliceHexUpper(data[8..10]),
-            std.fmt.fmtSliceHexUpper(data[10..12]),
-            std.fmt.fmtSliceHexUpper(data[12..14]),
-            std.fmt.fmtSliceHexUpper(data[14..16]),
-        },
-    );
-}
+    pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
+        try writer.print(
+            "{X}:{X}:{X}:{X}:{X}:{X}:{X}:{X}",
+            .{
+                self.data[0..2],
+                self.data[2..4],
+                self.data[4..6],
+                self.data[6..8],
+                self.data[8..10],
+                self.data[10..12],
+                self.data[12..14],
+                self.data[14..16],
+            },
+        );
+    }
+};
 
-fn fmtIp6Addr(ip_addr: [16]u8) std.fmt.Formatter(formatIp6Addr) {
-    return std.fmt.Formatter(formatIp6Addr){ .data = ip_addr };
+fn fmtIp6Addr(ip_addr: [16]u8) Ip6AddrFormatter {
+    return .{ .data = ip_addr };
 }
 
 /// Low-level API for controlling BP35C0 via the underlying port.
 pub fn BP35C0Raw(comptime Port: type) type {
     return struct {
         const Self = @This();
-        const EventQueue = std.fifo.LinearFifo(Event, .Dynamic);
+        const EventQueue = std.Deque(Event);
 
         port: *Port,
         allocator: mem.Allocator,
@@ -173,7 +174,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
             return Self{
                 .port = port,
                 .allocator = allocator,
-                .event_queue = EventQueue.init(allocator),
+                .event_queue = .empty,
             };
         }
 
@@ -188,30 +189,28 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
         pub fn close(self: *Self) void {
             self.skterm() catch {};
-            self.event_queue.deinit();
+            self.event_queue.deinit(self.allocator);
         }
 
         /// Write characters to the underlying port.
         fn write(self: *Self, comptime fmt: []const u8, args: anytype) !void {
             log.debug("> " ++ fmt, args);
-            try std.fmt.format(self.port.writer(), fmt, args);
+            try self.port.print(fmt, args);
         }
 
         /// Write a command line and CR + LF.
         fn writeLine(self: *Self, comptime fmt: []const u8, args: anytype) !void {
             log.debug("> " ++ fmt, args);
-            try std.fmt.format(self.port.writer(), fmt ++ "\r\n", args);
+            try self.port.print(fmt ++ "\r\n", args);
         }
 
         /// Read data from the port until CR + LF is found.
         fn readLine(self: *Self) ![]u8 {
-            const reader = self.port.reader();
-
-            var buf = std.ArrayList(u8).init(self.allocator);
+            var buf = ArrayList(u8).init(self.allocator);
             var cr = false;
 
             while (true) {
-                const b = try reader.readByte();
+                const b = try self.port.readByte();
                 if (cr and b == LF) {
                     _ = buf.pop(); // Remove the last CR
                     break;
@@ -229,18 +228,16 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
         fn readCRLF(self: *Self) !void {
             var buf: [2]u8 = undefined;
-            const len = try self.port.read(&buf);
-            debug.assert(len == 2);
+            try self.port.readAll(&buf);
             debug.assert(mem.eql(u8, &buf, CRLF));
         }
 
         /// Read the next response from the device and interpret as an error or void.
         fn readResult(self: *Self) !void {
-            const reader = self.port.reader();
             var buf: [4]u8 = undefined;
 
             while (true) {
-                _ = try reader.readAll(&buf);
+                try self.port.readAll(&buf);
 
                 if (mem.eql(u8, &buf, "OK" ++ CRLF)) {
                     log.debug("< OK", .{});
@@ -248,8 +245,8 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 }
 
                 if (mem.eql(u8, &buf, "FAIL")) {
-                    _ = try reader.readByte();
-                    _ = try reader.read(&buf);
+                    _ = try self.port.readByte();
+                    try self.port.readAll(&buf);
                     _ = try self.readCRLF();
 
                     inline for (@typeInfo(ErrorCode).@"enum".fields) |f| {
@@ -280,7 +277,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                     try self.port.putBack(&buf);
 
                     const event = try self.waitNewEvent();
-                    try self.event_queue.writeItem(event);
+                    try self.event_queue.pushBack(self.allocator, event);
                     log.debug("Postponed an event: {}", .{event});
 
                     continue;
@@ -302,15 +299,15 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
         pub fn sksetrbid(self: *Self, rbid: []const u8) !void {
             try self.write("SKSETRBID ", .{});
-            try self.port.writer().writeAll(rbid);
-            try self.port.writer().writeAll(CRLF);
+            try self.port.writeAll(rbid);
+            try self.port.writeAll(CRLF);
             return try self.readResult();
         }
 
         pub fn sksetpwd(self: *Self, pwd: []const u8) !void {
             try self.write("SKSETPWD {X} ", .{pwd.len});
-            try self.port.writer().writeAll(pwd);
-            try self.port.writer().writeAll(CRLF);
+            try self.port.writeAll(pwd);
+            try self.port.writeAll(CRLF);
             return try self.readResult();
         }
 
@@ -326,17 +323,17 @@ pub fn BP35C0Raw(comptime Port: type) type {
         }
 
         pub fn skll64(self: *Self, addr64: [8]u8) ![16]u8 {
-            try self.writeLine("SKLL64 {}", .{std.fmt.fmtSliceHexUpper(&addr64)});
+            try self.writeLine("SKLL64 {X}", .{&addr64});
 
             const buf = try self.readLine();
             defer self.allocator.free(buf);
 
-            const ip6_addr = try std.net.Ip6Address.parse(buf, 0);
-            return ip6_addr.sa.addr;
+            const ip6_addr = try Io.net.Ip6Address.parse(buf, 0);
+            return ip6_addr.bytes;
         }
 
         pub fn skjoin(self: *Self, ip_addr: [16]u8) !void {
-            try self.writeLine("SKJOIN {}", .{fmtIp6Addr(ip_addr)});
+            try self.writeLine("SKJOIN {f}", .{fmtIp6Addr(ip_addr)});
             return self.readResult();
         }
 
@@ -349,7 +346,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
             side: Side,
             data: []const u8,
         ) !void {
-            try self.write("SKSENDTO {X} {} {X:0>4} {X} {X} {X:0>4} ", .{
+            try self.write("SKSENDTO {X} {f} {X:0>4} {X} {X} {X:0>4} ", .{
                 handle,
                 fmtIp6Addr(ip_addr),
                 port,
@@ -357,9 +354,9 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 @intFromEnum(side),
                 data.len,
             });
-            try self.port.writer().writeAll(data);
+            try self.port.writeAll(data);
 
-            log.debug("> {}", .{std.fmt.fmtSliceHexUpper(data)});
+            log.debug("> {X}", .{data});
 
             // Unlike other commands, the response to SKSENDTO starts with CRLF.
             try self.readCRLF();
@@ -372,19 +369,17 @@ pub fn BP35C0Raw(comptime Port: type) type {
         }
 
         fn readWord(self: *Self) ![]u8 {
-            const reader = self.port.reader();
-
-            var buf = std.ArrayList(u8).init(self.allocator);
+            var buf = ArrayList(u8).init(self.allocator);
             defer buf.deinit();
 
             while (true) {
-                const b = try reader.readByte();
+                const b = try self.port.readByte();
                 if (b == ' ') {
                     break;
                 }
 
                 if (b == CR) {
-                    debug.assert(try reader.readByte() == LF);
+                    debug.assert(try self.port.readByte() == LF);
                     break;
                 }
 
@@ -396,7 +391,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
         fn readProperty(self: *Self, comptime name: []const u8) !void {
             var buf: [name.len + 3]u8 = undefined;
-            _ = try self.port.reader().readAll(&buf);
+            try self.port.readAll(&buf);
             debug.assert(mem.eql(u8, &buf, "  " ++ name ++ ":"));
         }
 
@@ -435,11 +430,11 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
             const data_len = try self.readUnsignedHex(u16);
             const data = try self.allocator.alloc(u8, data_len);
-            debug.assert(try self.port.reader().readAll(data) == data_len);
+            try self.port.readAll(data);
 
             _ = try self.readCRLF();
 
-            log.debug("< ERXUDP {s} {s} {X:0>4} {X:0>4} {s} {X} {X} {X:0>4} {}", .{
+            log.debug("< ERXUDP {s} {s} {X:0>4} {X:0>4} {s} {X} {X} {X:0>4} {X}", .{
                 sender,
                 dest,
                 rport,
@@ -448,13 +443,13 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 secured,
                 side,
                 data_len,
-                std.fmt.fmtSliceHexUpper(data),
+                data,
             });
 
             return .{
                 ._allocator = self.allocator,
-                .sender = (try std.net.Ip6Address.parse(sender, 0)).sa.addr,
-                .dest = (try std.net.Ip6Address.parse(dest, 0)).sa.addr,
+                .sender = (try Io.net.Ip6Address.parse(sender, 0)).bytes,
+                .dest = (try Io.net.Ip6Address.parse(dest, 0)).bytes,
                 .rport = rport,
                 .lport = lport,
                 .sender_lla = sender_lla,
@@ -497,11 +492,11 @@ pub fn BP35C0Raw(comptime Port: type) type {
             defer self.allocator.free(pair_id);
             debug.assert(addr.len == 8);
 
-            log.debug("< EPANDESC ( Channel = {X}, Channel Page = {X}, PAN ID = {X}, Addr = {}, LQI = {X}, Side = {X}, Pair ID = {s} )", .{
+            log.debug("< EPANDESC ( Channel = {X}, Channel Page = {X}, PAN ID = {X}, Addr = {X}, LQI = {X}, Side = {X}, Pair ID = {s} )", .{
                 channel,
                 channel_page,
                 pan_id,
-                std.fmt.fmtSliceHexUpper(&addr),
+                &addr,
                 lqi,
                 side,
                 pair_id,
@@ -529,11 +524,11 @@ pub fn BP35C0Raw(comptime Port: type) type {
             const side = try self.readUnsignedHex(u8);
             const param = if (num == 0x21 or num == 0x45) try self.readUnsignedHex(u8) else null;
 
-            log.debug("< EVENT {X} {s} {X} {?X}", .{num, sender, side, param});
+            log.debug("< EVENT {X} {s} {X} {?X}", .{ num, sender, side, param });
 
             return .{
                 .num = num,
-                .sender = (try std.net.Ip6Address.parse(sender, 0)).sa.addr,
+                .sender = (try Io.net.Ip6Address.parse(sender, 0)).bytes,
                 .side = @enumFromInt(side),
                 .param = param,
             };
@@ -562,7 +557,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
         pub fn waitEvent(self: *Self) !Event {
             // Consume the event queue first.
-            if (self.event_queue.readItem()) |event| {
+            if (self.event_queue.popFront()) |event| {
                 log.debug("Consumed a postponed event: {}", .{event});
 
                 return event;
@@ -572,7 +567,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
         }
 
         pub fn pollEvent(self: *Self, timeout: i32) !?Event {
-            if (self.event_queue.readableLength() > 0) {
+            if (self.event_queue.len > 0) {
                 return try self.waitEvent();
             }
 
@@ -743,48 +738,69 @@ pub fn BP35C0(comptime Port: type) type {
 
 const TestingPort = struct {
     const Self = @This();
+    const Buffer = struct {
+        buffer: []u8,
+        pos: usize = 0,
+    };
 
-    rx: io.FixedBufferStream([]u8),
-    tx: io.FixedBufferStream([]u8),
-    peek: std.fifo.LinearFifo(u8, .Dynamic),
+    rx: Buffer,
+    tx: Buffer,
+    peek: std.Deque(u8),
     allocator: mem.Allocator,
 
     fn init(allocator: mem.Allocator) !Self {
         return Self{
-            .rx = io.fixedBufferStream(try allocator.alloc(u8, 1024)),
-            .tx = io.fixedBufferStream(try allocator.alloc(u8, 1024)),
-            .peek = std.fifo.LinearFifo(u8, .Dynamic).init(allocator),
+            .rx = .{ .buffer = try allocator.alloc(u8, 1024) },
+            .tx = .{ .buffer = try allocator.alloc(u8, 1024) },
+            .peek = .empty,
             .allocator = allocator,
         };
     }
 
-    fn deinit(self: Self) void {
+    fn deinit(self: *Self) void {
         self.allocator.free(self.rx.buffer);
         self.allocator.free(self.tx.buffer);
-        self.peek.deinit();
+        self.peek.deinit(self.allocator);
     }
 
     pub fn putBack(self: *Self, buf: []const u8) !void {
-        try self.peek.unget(buf);
+        try self.peek.pushFrontSlice(self.allocator, buf);
     }
 
-    const Reader = io.Reader(*Self, anyerror, read);
-
     fn read(self: *Self, buf: []u8) !usize {
-        var len = self.peek.read(buf);
+        var len: usize = 0;
+        while (len < buf.len) : (len += 1) {
+            buf[len] = self.peek.popFront() orelse break;
+        }
         if (len < buf.len) {
-            len += try self.rx.read(buf[len..]);
+            const remaining = buf.len - len;
+            @memcpy(buf[len..], self.rx.buffer[self.rx.pos..][0..remaining]);
+            self.rx.pos += remaining;
+            len += remaining;
         }
 
         return len;
     }
 
-    fn reader(self: *Self) Reader {
-        return .{ .context = self };
+    fn readAll(self: *Self, buf: []u8) !void {
+        if (try self.read(buf) != buf.len) return error.EndOfStream;
     }
 
-    fn writer(self: *Self) io.FixedBufferStream([]u8).Writer {
-        return self.tx.writer();
+    fn readByte(self: *Self) !u8 {
+        var buf: [1]u8 = undefined;
+        try self.readAll(&buf);
+        return buf[0];
+    }
+
+    fn writeAll(self: *Self, bytes: []const u8) !void {
+        @memcpy(self.tx.buffer[self.tx.pos..][0..bytes.len], bytes);
+        self.tx.pos += bytes.len;
+    }
+
+    fn print(self: *Self, comptime fmt: []const u8, args: anytype) !void {
+        var writer = Io.Writer.fixed(self.tx.buffer[self.tx.pos..]);
+        try writer.print(fmt, args);
+        self.tx.pos += writer.end;
     }
 };
 
