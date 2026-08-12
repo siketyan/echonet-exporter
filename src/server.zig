@@ -346,6 +346,81 @@ test "handleRequest - responds with the metrics of every configured property" {
     , body);
 }
 
+/// Builds a config whose single property carries one value of every type.
+fn testingTypesConfig(allocator: mem.Allocator) !config.Config {
+    const Layouts = std.array_list.Managed(config.Layout);
+    var layout = try Layouts.initCapacity(allocator, @typeInfo(config.Type).@"enum".fields.len);
+    inline for (@typeInfo(config.Type).@"enum".fields) |f| {
+        layout.appendAssumeCapacity(.{
+            .type = @enumFromInt(f.value),
+            .name = try config.String.fromSlice(allocator, f.name),
+        });
+    }
+
+    return config.Config{
+        .address = try net.IpAddress.parse("127.0.0.1", 12345),
+        .device = try config.String.fromSlice(allocator, "/dev/ttyUSB0"),
+        .target = .{
+            .class_group_code = 0x02,
+            .class_code = 0x88,
+            .instance_code = 0x01,
+        },
+        .measures = try util.listFromSlice(config.Measure, allocator, &.{}),
+        .properties = try util.listFromSlice(config.Property, allocator, &.{.{
+            .epc = 0xE8,
+            .layout = layout,
+        }}),
+    };
+}
+
+test "handleRequest - formats a value of every type" {
+    const t = std.testing;
+
+    const conf = try testingTypesConfig(t.allocator);
+    defer conf.deinit();
+
+    // The same bytes are read as signed and as unsigned, so a mistake in the
+    // width or the signedness cannot go unnoticed.
+    const response = try testingResponse(t.allocator, 0xE8, "\xFF" ++ // signed_char
+        "\xFF\xFE" ++ // signed_short
+        "\xFF\xFF\xFF\xFD" ++ // signed_long
+        "\xFF" ++ // unsigned_char
+        "\xFF\xFE" ++ // unsigned_short
+        "\xFF\xFF\xFF\xFD" // unsigned_long
+    );
+    defer response.deinit();
+
+    const controller = TestingController{ .response = response };
+
+    var out: [1024]u8 = undefined;
+    const bytes = try handleTestRequest(conf, &controller, .GET, "/metrics", &out);
+
+    const body = try expectHead(
+        \\HTTP/1.1 200 OK
+        \\connection: close
+        \\content-length: 268
+        \\Content-Type: text/plain; version=0.0.4
+        \\
+        \\
+    , bytes);
+
+    try t.expectEqualStrings(
+        \\# TYPE signed_char gauge
+        \\signed_char -1
+        \\# TYPE signed_short gauge
+        \\signed_short -2
+        \\# TYPE signed_long gauge
+        \\signed_long -3
+        \\# TYPE unsigned_char gauge
+        \\unsigned_char 255
+        \\# TYPE unsigned_short gauge
+        \\unsigned_short 65534
+        \\# TYPE unsigned_long gauge
+        \\unsigned_long 4294967293
+        \\
+    , body);
+}
+
 test "handleRequest - omits the help line of a measure without one" {
     const t = std.testing;
 
