@@ -117,7 +117,8 @@ pub fn Server(comptime Controller: type) type {
             };
 
             const resp = try self.controller.handle(req) orelse {
-                // TODO: Retry
+                // The controller has already retransmitted the request, so the
+                // device is out of reach for now.
                 try request.respond(&.{}, .{ .status = .gateway_timeout });
                 log.info("504 Gateway Timeout", .{});
                 return;
