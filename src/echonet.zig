@@ -56,6 +56,8 @@ pub const Property = struct {
         const pdc = try reader.takeByte();
         if (pdc > 0) {
             const edt = try allocator.alloc(u8, pdc);
+            errdefer allocator.free(edt);
+
             try reader.readSliceAll(edt);
             self.edt = ArrayList(u8).fromOwnedSlice(allocator, edt);
         } else {
@@ -152,9 +154,18 @@ pub const EDATA = struct {
 
         const opc = try reader.takeByte();
         const props = try allocator.alloc(Property, opc);
-        for (0..opc) |i| {
-            try props[i].readAlloc(reader, allocator);
+
+        // Only the properties read so far own anything worth releasing.
+        var read: usize = 0;
+        errdefer {
+            for (props[0..read]) |prop| prop.deinit();
+            allocator.free(props);
         }
+
+        while (read < opc) : (read += 1) {
+            try props[read].readAlloc(reader, allocator);
+        }
+
         self.props = PropertyList.fromOwnedSlice(allocator, props);
     }
 
@@ -439,6 +450,83 @@ test "writing to bytes - format 2" {
     defer t.allocator.free(bytes);
 
     try t.expectEqualStrings("\x10\x82\x12\x34\xDE\xAD\xBE\xEF", bytes);
+}
+
+/// A Get_Res answering about the instantaneous power and current at once.
+const format1_with_two_properties =
+    "\x10\x81\x12\x34\x02\x88\x01\x05\xFF\x01\x72\x02" ++
+    "\xE7\x04\x00\x00\x01\xF4" ++
+    "\xE8\x04\x12\x34\x56\x79";
+
+fn format1WithTwoProperties(allocator: mem.Allocator) !Frame {
+    return Frame{
+        .format1 = .{
+            .tid = 0x1234,
+            .edata = .{
+                .seoj = .{
+                    .class_group_code = 0x02,
+                    .class_code = 0x88,
+                    .instance_code = 0x01,
+                },
+                .deoj = .{
+                    .class_group_code = 0x05,
+                    .class_code = 0xFF,
+                    .instance_code = 0x01,
+                },
+                .esv = 0x72, // Get_Res
+                .props = try PropertyList.fromSlice(allocator, &.{
+                    .{
+                        .epc = 0xE7,
+                        .edt = try util.listFromSlice(u8, allocator, "\x00\x00\x01\xF4"),
+                    },
+                    .{
+                        .epc = 0xE8,
+                        .edt = try util.listFromSlice(u8, allocator, "\x12\x34\x56\x79"),
+                    },
+                }),
+            },
+        },
+    };
+}
+
+test "reading from bytes - format 1 with several property values" {
+    const t = std.testing;
+
+    var reader = io.Reader.fixed(format1_with_two_properties);
+
+    var actual: Frame = undefined;
+    try actual.readAlloc(&reader, t.allocator);
+    defer actual.deinit();
+
+    const expected = try format1WithTwoProperties(t.allocator);
+    defer expected.deinit();
+
+    try t.expectEqualDeep(expected, actual);
+}
+
+test "writing to bytes - format 1 with several property values" {
+    const t = std.testing;
+
+    const frame = try format1WithTwoProperties(t.allocator);
+    defer frame.deinit();
+
+    // toBytesAlloc asserts that len() agrees with what write() produced.
+    try t.expectEqual(format1_with_two_properties.len, frame.len());
+
+    const bytes = try frame.toBytesAlloc(t.allocator);
+    defer t.allocator.free(bytes);
+
+    try t.expectEqualStrings(format1_with_two_properties, bytes);
+}
+
+test "reading from bytes - reports a frame cut short" {
+    const t = std.testing;
+
+    // The value of the second property is missing its last two bytes.
+    var reader = io.Reader.fixed(format1_with_two_properties[0 .. format1_with_two_properties.len - 2]);
+
+    var frame: Frame = undefined;
+    try t.expectError(error.EndOfStream, frame.readAlloc(&reader, t.allocator));
 }
 
 test "reading from bytes - rejects an unknown EHD1" {
