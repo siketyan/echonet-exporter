@@ -222,8 +222,9 @@ pub const Frame = union(enum) {
     }
 
     pub fn readAlloc(self: *Frame, reader: *io.Reader, alloc: mem.Allocator) !void {
+        // A frame arrives from the network, so a malformed one must not be fatal.
         const ehd1 = try reader.takeByte();
-        debug.assert(ehd1 == 0x10);
+        if (ehd1 != 0x10) return error.InvalidFrameHeader;
 
         const ehd2 = try reader.takeByte();
         switch (ehd2) {
@@ -240,7 +241,7 @@ pub const Frame = union(enum) {
                 const edata = try reader.allocRemaining(alloc, .unlimited);
                 self.format2.edata = ArrayList(u8).fromOwnedSlice(alloc, edata);
             },
-            else => debug.panic("unexpected EHD2: 0x{X:0>2}", .{ehd2}),
+            else => return error.UnsupportedFrameFormat,
         }
     }
 
@@ -438,6 +439,24 @@ test "writing to bytes - format 2" {
     defer t.allocator.free(bytes);
 
     try t.expectEqualStrings("\x10\x82\x12\x34\xDE\xAD\xBE\xEF", bytes);
+}
+
+test "reading from bytes - rejects an unknown EHD1" {
+    const t = std.testing;
+
+    var reader = io.Reader.fixed("\x20\x81\x12\x34\x05\xFF\x01\x02\x88\x01\x62\x00");
+
+    var frame: Frame = undefined;
+    try t.expectError(error.InvalidFrameHeader, frame.readAlloc(&reader, t.allocator));
+}
+
+test "reading from bytes - rejects an unsupported EHD2" {
+    const t = std.testing;
+
+    var reader = io.Reader.fixed("\x10\x83\x12\x34\xDE\xAD\xBE\xEF");
+
+    var frame: Frame = undefined;
+    try t.expectError(error.UnsupportedFrameFormat, frame.readAlloc(&reader, t.allocator));
 }
 
 test "clone - format 1 does not share the property value with the original" {
