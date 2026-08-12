@@ -71,14 +71,9 @@ jobs:
       - name: Build
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
 
-      # actions/upload-artifact re-zips the payload and loses the executable bit,
-      # so pack the binary into a tarball to keep it runnable after downloading.
-      - name: Pack the binary
-        run: tar -czf echonet-exporter-${{ matrix.target }}.tar.gz -C zig-out/bin echonet-exporter
-
       - name: Upload the artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: echonet-exporter-${{ matrix.target }}
-          path: echonet-exporter-${{ matrix.target }}.tar.gz
+          path: zig-out/bin/echonet-exporter
           if-no-files-found: error
