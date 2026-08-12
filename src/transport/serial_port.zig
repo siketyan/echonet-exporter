@@ -178,3 +178,23 @@ test {
     try t.expectEqual(13, len);
     try t.expectEqualStrings("Hello, world!", &buf3);
 }
+
+test "poll - reports whether the next data is available" {
+    const t = std.testing;
+
+    // A pipe stays empty until written to, unlike a regular file, which always
+    // reports itself as ready.
+    const fds = try std.Io.Threaded.pipe2(.{});
+
+    var write_fd: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+    defer write_fd.close(t.io);
+
+    var port = SerialPort.init(.{ .handle = fds[0], .flags = .{ .nonblocking = false } }, t.io, t.allocator);
+    defer port.close();
+
+    try t.expect(!try port.poll(0));
+
+    try write_fd.writeStreamingAll(t.io, "Hello");
+
+    try t.expect(try port.poll(0));
+}
