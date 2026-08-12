@@ -265,7 +265,9 @@ pub fn BP35C0Raw(comptime Port: type) type {
                         }
                     }
 
-                    debug.panic("Unexpected error code {s}", .{&buf});
+                    // A reserved code lands here too, so it must not be fatal.
+                    log.warn("Received an unexpected error code: {s}", .{&buf});
+                    return error.UnexpectedErrorCode;
                 }
 
                 if (mem.startsWith(u8, &buf, "SK")) {
@@ -622,7 +624,7 @@ pub fn BP35C0(comptime Port: type) type {
                 return error.AlreadyConnected;
             }
 
-            self.credentials = creds;
+            self.options.credentials = creds;
         }
 
         pub fn connect(self: *Self) !void {
@@ -741,6 +743,7 @@ const TestingPort = struct {
     const Buffer = struct {
         buffer: []u8,
         pos: usize = 0,
+        len: usize = 0,
     };
 
     rx: Buffer,
@@ -765,6 +768,25 @@ const TestingPort = struct {
 
     pub fn putBack(self: *Self, buf: []const u8) !void {
         try self.peek.pushFrontSlice(self.allocator, buf);
+    }
+
+    /// Queue up what the device would respond with.
+    fn feed(self: *Self, data: []const u8) void {
+        debug.assert(self.rx.len + data.len <= self.rx.buffer.len);
+
+        @memcpy(self.rx.buffer[self.rx.len..][0..data.len], data);
+        self.rx.len += data.len;
+    }
+
+    /// Everything written to the port so far.
+    fn written(self: *const Self) []const u8 {
+        return self.tx.buffer[0..self.tx.pos];
+    }
+
+    fn poll(self: *Self, timeout: i32) !bool {
+        _ = timeout;
+
+        return self.peek.len > 0 or self.rx.pos < self.rx.len;
     }
 
     fn read(self: *Self, buf: []u8) !usize {
@@ -1020,6 +1042,303 @@ test "EVENT" {
     };
 
     try t.expectEqualDeep(expected, actual);
+}
+
+test "readResult - maps every error code" {
+    const t = std.testing;
+
+    const cases = .{
+        .{ "ER04", Error.CommandNotSupported },
+        .{ "ER05", Error.InvalidArgument },
+        .{ "ER06", Error.InvalidFormatOrOutOfRange },
+        .{ "ER09", Error.UartInputError },
+        .{ "ER10", Error.ExecutionFailed },
+    };
+
+    inline for (cases) |case| {
+        var port = try TestingPort.init(t.allocator);
+        defer port.deinit();
+
+        var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+        defer bp35c0.event_queue.deinit(t.allocator);
+
+        port.feed("FAIL " ++ case[0] ++ CRLF);
+
+        try t.expectError(case[1], bp35c0.skreset());
+    }
+}
+
+test "readResult - reports a reserved error code" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = BP35C0Raw(TestingPort).initUnsafe(&port, t.allocator);
+    defer bp35c0.event_queue.deinit(t.allocator);
+
+    port.feed("FAIL ER01" ++ CRLF);
+
+    try t.expectError(error.UnexpectedErrorCode, bp35c0.skreset());
+}
+
+const epandesc_response =
+    "EPANDESC" ++ CRLF ++
+    "  Channel:21" ++ CRLF ++
+    "  Channel Page:09" ++ CRLF ++
+    "  Pan ID:8888" ++ CRLF ++
+    "  Addr:12345678ABCDEF01" ++ CRLF ++
+    "  LQI:E1" ++ CRLF ++
+    "  Side:0" ++ CRLF ++
+    "  PairID:AABBCCDD" ++ CRLF;
+
+const remote_ip6_addr = "FE80:0000:0000:0000:021D:1290:1234:5678";
+
+fn eventResponse(comptime num: []const u8) []const u8 {
+    return "EVENT " ++ num ++ " " ++ remote_ip6_addr ++ " 0" ++ CRLF;
+}
+
+const testing_options: Options = .{
+    .credentials = .{
+        .rbid = "0123456789ABCDEF0123456789ABCDEF",
+        .pwd = "0123456789AB",
+    },
+};
+
+/// Builds a BP35C0 without the reset sequence that init() performs.
+fn testingBP35C0(port: *TestingPort, allocator: mem.Allocator) BP35C0(TestingPort) {
+    return BP35C0(TestingPort){
+        .raw = BP35C0Raw(TestingPort).initUnsafe(port, allocator),
+        .allocator = allocator,
+        .options = testing_options,
+    };
+}
+
+test "connect - performs the whole scan and join sequence" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = testingBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    port.feed("OK" ++ CRLF); // SKSETRBID
+    port.feed("OK" ++ CRLF); // SKSETPWD
+    port.feed("OK" ++ CRLF); // SKSCAN
+    port.feed(eventResponse("20")); // Scan started
+    port.feed(epandesc_response);
+    port.feed(eventResponse("22")); // Scan completed
+    port.feed(remote_ip6_addr ++ CRLF); // SKLL64
+    port.feed("OK" ++ CRLF); // SKSREG S02
+    port.feed("OK" ++ CRLF); // SKSREG S03
+    port.feed("OK" ++ CRLF); // SKJOIN
+    port.feed(eventResponse("25")); // Connection established
+
+    try bp35c0.connect();
+
+    try t.expect(bp35c0.is_connected);
+    try t.expectEqualStrings(
+        "\xFE\x80\x00\x00\x00\x00\x00\x00\x02\x1D\x12\x90\x12\x34\x56\x78",
+        &bp35c0.remote_addr.?,
+    );
+
+    // The channel and the PAN ID of the found coordinator must be registered.
+    try t.expectEqualStrings(
+        "SKSETRBID 0123456789ABCDEF0123456789ABCDEF" ++ CRLF ++
+            "SKSETPWD C 0123456789AB" ++ CRLF ++
+            "SKSCAN 2 FFFFFFFF 6 0" ++ CRLF ++
+            "SKLL64 12345678ABCDEF01" ++ CRLF ++
+            "SKSREG S02 21" ++ CRLF ++
+            "SKSREG S03 8888" ++ CRLF ++
+            "SKJOIN " ++ remote_ip6_addr ++ CRLF,
+        port.written(),
+    );
+}
+
+test "connect - reports that no coordinator was found" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = testingBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    port.feed("OK" ++ CRLF); // SKSETRBID
+    port.feed("OK" ++ CRLF); // SKSETPWD
+    port.feed("OK" ++ CRLF); // SKSCAN
+    port.feed(eventResponse("22")); // Scan completed without finding one
+
+    try t.expectError(error.CoordinatorNotFound, bp35c0.connect());
+    try t.expect(!bp35c0.is_connected);
+}
+
+test "connect - reports a failed join" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = testingBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    port.feed("OK" ++ CRLF); // SKSETRBID
+    port.feed("OK" ++ CRLF); // SKSETPWD
+    port.feed("OK" ++ CRLF); // SKSCAN
+    port.feed(eventResponse("20"));
+    port.feed(epandesc_response);
+    port.feed(eventResponse("22"));
+    port.feed(remote_ip6_addr ++ CRLF); // SKLL64
+    port.feed("OK" ++ CRLF); // SKSREG S02
+    port.feed("OK" ++ CRLF); // SKSREG S03
+    port.feed("OK" ++ CRLF); // SKJOIN
+    port.feed(eventResponse("24")); // Connection failed
+
+    try t.expectError(error.ConnectionFailed, bp35c0.connect());
+    try t.expect(!bp35c0.is_connected);
+}
+
+/// The link-local address of a node that is not the coordinator.
+const other_ip6_addr = "FE80:0000:0000:0000:021D:1290:0003:C890";
+
+fn erxudpResponse(comptime sender: []const u8, comptime data: []const u8) []const u8 {
+    return std.fmt.comptimePrint(
+        "ERXUDP {s} {s} 0E1A 0E1A 001D129012345678 1 0 {X:0>4} {s}" ++ CRLF,
+        .{ sender, remote_ip6_addr, data.len, data },
+    );
+}
+
+/// Builds a BP35C0 that has already joined the coordinator.
+fn connectedBP35C0(port: *TestingPort, allocator: mem.Allocator) BP35C0(TestingPort) {
+    var bp35c0 = testingBP35C0(port, allocator);
+    bp35c0.is_connected = true;
+    bp35c0.remote_addr = "\xFE\x80\x00\x00\x00\x00\x00\x00\x02\x1D\x12\x90\x12\x34\x56\x78".*;
+
+    return bp35c0;
+}
+
+test "send - refuses to send while disconnected" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = testingBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    try t.expectError(error.NotConnected, bp35c0.send("12345"));
+    try t.expectEqualStrings("", port.written());
+}
+
+test "send - writes the data to the coordinator" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = connectedBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    port.feed(CRLF ++ "OK" ++ CRLF);
+    try bp35c0.send("12345");
+
+    try t.expectEqualStrings(
+        "SKSENDTO 1 " ++ remote_ip6_addr ++ " 0E1A 1 0 0005 12345",
+        port.written(),
+    );
+}
+
+test "recv - refuses to receive while disconnected" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = testingBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    try t.expectError(error.NotConnected, bp35c0.recv(0));
+}
+
+test "recv - returns the data sent by the coordinator" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = connectedBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    port.feed(erxudpResponse(remote_ip6_addr, "12345"));
+
+    const data = try bp35c0.recv(0);
+    defer t.allocator.free(data);
+
+    try t.expectEqualStrings("12345", data);
+}
+
+test "recv - ignores traffic from another sender" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = connectedBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    port.feed(erxudpResponse(other_ip6_addr, "99999"));
+    port.feed(erxudpResponse(remote_ip6_addr, "12345"));
+
+    const data = try bp35c0.recv(0);
+    defer t.allocator.free(data);
+
+    try t.expectEqualStrings("12345", data);
+}
+
+test "recv - reports a timeout when nothing arrives" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = connectedBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    try t.expectError(error.TimedOut, bp35c0.recv(0));
+}
+
+test "setCredentials - refuses to replace the credentials while connected" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = connectedBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    try t.expectError(error.AlreadyConnected, bp35c0.setCredentials(.{
+        .rbid = "FEDCBA9876543210FEDCBA9876543210",
+        .pwd = "BA9876543210",
+    }));
+}
+
+test "setCredentials - replaces the credentials while disconnected" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = testingBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+
+    try bp35c0.setCredentials(.{
+        .rbid = "FEDCBA9876543210FEDCBA9876543210",
+        .pwd = "BA9876543210",
+    });
+
+    try t.expectEqualStrings("FEDCBA9876543210FEDCBA9876543210", bp35c0.options.credentials.?.rbid);
+    try t.expectEqualStrings("BA9876543210", bp35c0.options.credentials.?.pwd);
 }
 
 test "waitEvent" {
