@@ -1,6 +1,7 @@
 const std = @import("std");
 const debug = std.debug;
 const Io = std.Io;
+const log = std.log.scoped(.config);
 const mem = std.mem;
 
 const yaml = @import("yaml");
@@ -25,6 +26,15 @@ pub const String = struct {
     }
 };
 
+/// Look up a required field, reporting the name of a missing one.
+fn getField(map: yaml.Yaml.Map, name: []const u8) !yaml.Yaml.Value {
+    return map.get(name) orelse {
+        // The returned error tells the caller what happened; this tells the user where.
+        log.warn("Missing required field: {s}", .{name});
+        return error.MissingField;
+    };
+}
+
 fn parseString(value: yaml.Yaml.Value, allocator: mem.Allocator) !String {
     return try String.fromSlice(allocator, value.asScalar() orelse return error.TypeMismatch);
 }
@@ -32,6 +42,8 @@ fn parseString(value: yaml.Yaml.Value, allocator: mem.Allocator) !String {
 fn parseArrayList(comptime T: type, value: yaml.Yaml.Value, allocator: mem.Allocator) !ArrayList(T) {
     const value_list = value.asList() orelse return error.TypeMismatch;
     var list = try ArrayList(T).initCapacity(allocator, value_list.len);
+    errdefer deinitAll(T, list);
+
     for (value_list) |v| {
         var item: T = undefined;
         try item.parseYamlAlloc(v, allocator);
@@ -49,6 +61,10 @@ fn parseOptional(comptime T: type, value: ?yaml.Yaml.Value, allocator: mem.Alloc
     } else {
         return null;
     }
+}
+
+fn parseInt(comptime T: type, value: yaml.Yaml.Value) !T {
+    return try std.fmt.parseInt(T, value.asScalar() orelse return error.TypeMismatch, 0);
 }
 
 fn parseEnum(comptime T: type, value: yaml.Yaml.Value) !T {
@@ -80,8 +96,10 @@ pub const Credentials = struct {
     pub fn parseYamlAlloc(self: *Credentials, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = value.asMap() orelse return error.TypeMismatch;
 
-        self.rbid = try parseString(map.get("rbid").?, allocator);
-        self.pwd = try parseString(map.get("pwd").?, allocator);
+        self.rbid = try parseString(try getField(map, "rbid"), allocator);
+        errdefer self.rbid.deinit();
+
+        self.pwd = try parseString(try getField(map, "pwd"), allocator);
     }
 };
 
@@ -93,9 +111,9 @@ pub const Target = struct {
     pub fn parseYaml(self: *Target, value: yaml.Yaml.Value) !void {
         const map = value.asMap() orelse return error.TypeMismatch;
 
-        self.class_group_code = try std.fmt.parseInt(u8, map.get("class_group_code").?.asScalar() orelse return error.TypeMismatch, 0);
-        self.class_code = try std.fmt.parseInt(u8, map.get("class_code").?.asScalar() orelse return error.TypeMismatch, 0);
-        self.instance_code = try std.fmt.parseInt(u8, map.get("instance_code").?.asScalar() orelse return error.TypeMismatch, 0);
+        self.class_group_code = try parseInt(u8, try getField(map, "class_group_code"));
+        self.class_code = try parseInt(u8, try getField(map, "class_code"));
+        self.instance_code = try parseInt(u8, try getField(map, "instance_code"));
     }
 };
 
@@ -120,8 +138,10 @@ pub const Measure = struct {
     pub fn parseYamlAlloc(self: *Measure, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = value.asMap() orelse return error.TypeMismatch;
 
-        self.name = try String.fromSlice(allocator, map.get("name").?.asScalar() orelse return error.TypeMismatch);
-        self.help = if (map.get("help")) |v| try String.fromSlice(allocator, v.asScalar() orelse return error.TypeMismatch) else null;
+        self.name = try parseString(try getField(map, "name"), allocator);
+        errdefer self.name.deinit();
+
+        self.help = if (map.get("help")) |v| try parseString(v, allocator) else null;
     }
 };
 
@@ -136,8 +156,8 @@ pub const Layout = struct {
     pub fn parseYamlAlloc(self: *Layout, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = value.asMap() orelse return error.TypeMismatch;
 
-        self.type = try parseEnum(Type, map.get("type").?);
-        self.name = try parseString(map.get("name").?, allocator);
+        self.type = try parseEnum(Type, try getField(map, "type"));
+        self.name = try parseString(try getField(map, "name"), allocator);
     }
 };
 
@@ -152,8 +172,8 @@ pub const Property = struct {
     pub fn parseYamlAlloc(self: *Property, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = value.asMap() orelse return error.TypeMismatch;
 
-        self.epc = try std.fmt.parseInt(u8, map.get("epc").?.asScalar() orelse return error.TypeMismatch, 0);
-        self.layout = try parseArrayList(Layout, map.get("layout").?, allocator);
+        self.epc = try parseInt(u8, try getField(map, "epc"));
+        self.layout = try parseArrayList(Layout, try getField(map, "layout"), allocator);
     }
 };
 
@@ -175,17 +195,24 @@ pub const Config = struct {
     pub fn parseYamlAlloc(self: *Config, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = value.asMap() orelse return error.TypeMismatch;
 
-        var addr = mem.splitSequence(u8, map.get("address").?.asScalar() orelse return error.TypeMismatch, ":");
-        self.address = try Io.net.IpAddress.parse(
-            addr.next().?,
-            try std.fmt.parseUnsigned(u16, addr.next().?, 10),
-        );
+        const address = (try getField(map, "address")).asScalar() orelse return error.TypeMismatch;
+        var addr = mem.splitSequence(u8, address, ":");
+        const host = addr.next() orelse return error.InvalidAddress;
+        const port = addr.next() orelse return error.InvalidAddress;
+        self.address = try Io.net.IpAddress.parse(host, try std.fmt.parseUnsigned(u16, port, 10));
 
-        self.device = try String.fromSlice(allocator, map.get("device").?.asScalar() orelse return error.TypeMismatch);
+        self.device = try parseString(try getField(map, "device"), allocator);
+        errdefer self.device.deinit();
+
         self.credentials = try parseOptional(Credentials, map.get("credentials"), allocator);
-        try self.target.parseYaml(map.get("target").?);
-        self.measures = try parseArrayList(Measure, map.get("measures").?, allocator);
-        self.properties = try parseArrayList(Property, map.get("properties").?, allocator);
+        errdefer if (self.credentials) |creds| creds.deinit();
+
+        try self.target.parseYaml(try getField(map, "target"));
+
+        self.measures = try parseArrayList(Measure, try getField(map, "measures"), allocator);
+        errdefer deinitAll(Measure, self.measures);
+
+        self.properties = try parseArrayList(Property, try getField(map, "properties"), allocator);
     }
 
     pub fn loadYamlAlloc(buf: []const u8, alloc: mem.Allocator) !Config {
@@ -271,4 +298,111 @@ test "load config" {
     try t.expectEqualDeep(expected.credentials, actual.credentials);
     try t.expectEqualDeep(expected.target, actual.target);
     try t.expectEqualDeep(expected.measures, actual.measures);
+    try t.expectEqualDeep(expected.properties, actual.properties);
+}
+
+test "load config - without the optional fields" {
+    const t = std.testing;
+
+    const config =
+        \\address: 0.0.0.0:9100
+        \\device: /dev/ttyUSB0
+        \\target:
+        \\  class_group_code: 0x02
+        \\  class_code: 0x88
+        \\  instance_code: 0x01
+        \\measures:
+        \\  - name: measured_instantaneous_electric_power
+        \\properties:
+        \\  - epc: 0xE7
+        \\    layout:
+        \\      - type: signed_long
+        \\        name: measured_instantaneous_electric_power
+    ;
+
+    const actual = try Config.loadYamlAlloc(config, t.allocator);
+    defer actual.deinit();
+
+    try t.expectEqual(null, actual.credentials);
+    try t.expectEqual(null, actual.measures.items[0].help);
+}
+
+test "load config - reports a missing field" {
+    const t = std.testing;
+
+    // The EPC of the only property is missing, so the fields parsed before it
+    // must be released while unwinding.
+    const config =
+        \\address: 0.0.0.0:9100
+        \\device: /dev/ttyUSB0
+        \\target:
+        \\  class_group_code: 0x02
+        \\  class_code: 0x88
+        \\  instance_code: 0x01
+        \\measures:
+        \\  - name: measured_instantaneous_electric_power
+        \\properties:
+        \\  - layout:
+        \\      - type: signed_long
+        \\        name: measured_instantaneous_electric_power
+    ;
+
+    try t.expectError(error.MissingField, Config.loadYamlAlloc(config, t.allocator));
+}
+
+test "load config - reports a field of an unexpected type" {
+    const t = std.testing;
+
+    const config =
+        \\address: 0.0.0.0:9100
+        \\device:
+        \\  - /dev/ttyUSB0
+        \\target:
+        \\  class_group_code: 0x02
+        \\  class_code: 0x88
+        \\  instance_code: 0x01
+        \\measures: []
+        \\properties: []
+    ;
+
+    try t.expectError(error.TypeMismatch, Config.loadYamlAlloc(config, t.allocator));
+}
+
+test "load config - reports an unknown layout type" {
+    const t = std.testing;
+
+    const config =
+        \\address: 0.0.0.0:9100
+        \\device: /dev/ttyUSB0
+        \\target:
+        \\  class_group_code: 0x02
+        \\  class_code: 0x88
+        \\  instance_code: 0x01
+        \\measures:
+        \\  - name: measured_instantaneous_electric_power
+        \\properties:
+        \\  - epc: 0xE7
+        \\    layout:
+        \\      - type: float
+        \\        name: measured_instantaneous_electric_power
+    ;
+
+    try t.expectError(error.InvalidEnumValue, Config.loadYamlAlloc(config, t.allocator));
+}
+
+test "load config - reports an address without a port" {
+    const t = std.testing;
+
+    const config =
+        \\address: 0.0.0.0
+        \\device: /dev/ttyUSB0
+        \\target:
+        \\  class_group_code: 0x02
+        \\  class_code: 0x88
+        \\  instance_code: 0x01
+        \\measures: []
+        \\properties: []
+    ;
+
+    try t.expectError(error.InvalidAddress, Config.loadYamlAlloc(config, t.allocator));
 }
