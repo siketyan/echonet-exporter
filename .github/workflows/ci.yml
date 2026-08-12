@@ -28,6 +28,10 @@ jobs:
         with:
           version: 0.16.0
 
+      # Scoped to the sources, as a bare `.` would walk the fetched dependencies too.
+      - name: Check formatting
+        run: zig fmt --check src build.zig
+
       - name: Build
         run: zig build
 

@@ -6,7 +6,7 @@ pub const TransactionManager = struct {
     tid: TidValue,
 
     pub fn init() TransactionManager {
-        return TransactionManager {
+        return TransactionManager{
             .tid = TidValue.init(1),
         };
     }
