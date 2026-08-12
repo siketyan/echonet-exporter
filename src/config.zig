@@ -103,6 +103,34 @@ pub const Credentials = struct {
     }
 };
 
+/// How a transaction is retransmitted when its response could not be received.
+pub const Retry = struct {
+    /// How many times a transaction is sent before it is given up.
+    max_attempts: u8 = 3,
+    /// How long to wait for the response of each attempt, in milliseconds.
+    timeout_ms: i32 = 5000,
+
+    pub fn parseYaml(self: *Retry, value: yaml.Yaml.Value) !void {
+        const map = value.asMap() orelse return error.TypeMismatch;
+
+        self.* = .{};
+
+        if (map.get("max_attempts")) |v| self.max_attempts = try parseInt(u8, v);
+        if (map.get("timeout_ms")) |v| self.timeout_ms = try parseInt(i32, v);
+
+        // Every transaction is sent at least once, and waited for at least a moment.
+        if (self.max_attempts < 1) {
+            log.warn("Field must be 1 or greater: max_attempts", .{});
+            return error.InvalidValue;
+        }
+
+        if (self.timeout_ms < 1) {
+            log.warn("Field must be 1 or greater: timeout_ms", .{});
+            return error.InvalidValue;
+        }
+    }
+};
+
 pub const Target = struct {
     class_group_code: u8,
     class_code: u8,
@@ -181,6 +209,7 @@ pub const Config = struct {
     address: Io.net.IpAddress,
     device: String,
     credentials: ?Credentials = null,
+    retry: Retry = .{},
     target: Target,
     measures: ArrayList(Measure),
     properties: ArrayList(Property),
@@ -206,6 +235,8 @@ pub const Config = struct {
 
         self.credentials = try parseOptional(Credentials, map.get("credentials"), allocator);
         errdefer if (self.credentials) |creds| creds.deinit();
+
+        if (map.get("retry")) |v| try self.retry.parseYaml(v) else self.retry = .{};
 
         try self.target.parseYaml(try getField(map, "target"));
 
@@ -325,6 +356,91 @@ test "load config - without the optional fields" {
 
     try t.expectEqual(null, actual.credentials);
     try t.expectEqual(null, actual.measures.items[0].help);
+    try t.expectEqualDeep(Retry{}, actual.retry);
+}
+
+test "load config - overrides the retry policy" {
+    const t = std.testing;
+
+    const config =
+        \\address: 0.0.0.0:9100
+        \\device: /dev/ttyUSB0
+        \\retry:
+        \\  max_attempts: 5
+        \\  timeout_ms: 3000
+        \\target:
+        \\  class_group_code: 0x02
+        \\  class_code: 0x88
+        \\  instance_code: 0x01
+        \\measures: []
+        \\properties: []
+    ;
+
+    const actual = try Config.loadYamlAlloc(config, t.allocator);
+    defer actual.deinit();
+
+    try t.expectEqualDeep(Retry{ .max_attempts = 5, .timeout_ms = 3000 }, actual.retry);
+}
+
+test "load config - keeps the defaults of the retry fields left out" {
+    const t = std.testing;
+
+    const config =
+        \\address: 0.0.0.0:9100
+        \\device: /dev/ttyUSB0
+        \\retry:
+        \\  timeout_ms: 3000
+        \\target:
+        \\  class_group_code: 0x02
+        \\  class_code: 0x88
+        \\  instance_code: 0x01
+        \\measures: []
+        \\properties: []
+    ;
+
+    const actual = try Config.loadYamlAlloc(config, t.allocator);
+    defer actual.deinit();
+
+    const defaults = Retry{};
+    try t.expectEqualDeep(Retry{ .max_attempts = defaults.max_attempts, .timeout_ms = 3000 }, actual.retry);
+}
+
+test "load config - rejects a retry policy that never sends anything" {
+    const t = std.testing;
+
+    const config =
+        \\address: 0.0.0.0:9100
+        \\device: /dev/ttyUSB0
+        \\retry:
+        \\  max_attempts: 0
+        \\target:
+        \\  class_group_code: 0x02
+        \\  class_code: 0x88
+        \\  instance_code: 0x01
+        \\measures: []
+        \\properties: []
+    ;
+
+    try t.expectError(error.InvalidValue, Config.loadYamlAlloc(config, t.allocator));
+}
+
+test "load config - rejects a retry policy that never waits" {
+    const t = std.testing;
+
+    const config =
+        \\address: 0.0.0.0:9100
+        \\device: /dev/ttyUSB0
+        \\retry:
+        \\  timeout_ms: 0
+        \\target:
+        \\  class_group_code: 0x02
+        \\  class_code: 0x88
+        \\  instance_code: 0x01
+        \\measures: []
+        \\properties: []
+    ;
+
+    try t.expectError(error.InvalidValue, Config.loadYamlAlloc(config, t.allocator));
 }
 
 test "load config - reports a missing field" {

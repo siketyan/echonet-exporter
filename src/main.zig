@@ -51,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
     const controller = Controller(BP35C0){
         .allocator = allocator,
         .transport = &bp35c0,
+        .retry = conf.retry,
         // .writer = &writer,
     };
 

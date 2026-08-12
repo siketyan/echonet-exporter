@@ -3,6 +3,9 @@ device: /dev/ttyUSB0
 credentials:
   rbid: '<Route B Authentication ID>'
   pwd: '<Route B Authentication Password>'
+retry:
+  max_attempts: 3         # トランザクションの送信回数 (再送を含む)
+  timeout_ms: 5000        # 1 回あたりの応答待ち時間 (ミリ秒)
 target:
   class_group_code: 0x02  # 住宅・設備関連機器クラスグループ
   class_code: 0x88        # 低圧スマート電力量メータクラス
