@@ -11,7 +11,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    exe.root_module.addImport("pcapfile", b.dependency("zig-pcapfile", .{}).module("zig-pcapfile"));
     exe.root_module.addImport("serial", b.dependency("serial", .{}).module("serial"));
     exe.root_module.addImport("yaml", b.dependency("zig-yaml", .{}).module("yaml"));
 
@@ -34,7 +33,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    unit_tests.root_module.addImport("pcapfile", b.dependency("zig-pcapfile", .{}).module("zig-pcapfile"));
     unit_tests.root_module.addImport("serial", b.dependency("serial", .{}).module("serial"));
     unit_tests.root_module.addImport("yaml", b.dependency("zig-yaml", .{}).module("yaml"));
 

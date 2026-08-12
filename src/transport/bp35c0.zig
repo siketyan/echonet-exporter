@@ -213,7 +213,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
             while (true) {
                 const b = try reader.readByte();
                 if (cr and b == LF) {
-                    _ = buf.popOrNull(); // Remove the last CR
+                    _ = buf.pop(); // Remove the last CR
                     break;
                 }
 

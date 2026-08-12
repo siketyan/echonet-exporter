@@ -6,8 +6,6 @@ const log = std.log;
 const mem = std.mem;
 const net = std.net;
 
-const pcapfile = @import("pcapfile");
-
 const config = @import("./config.zig");
 const echonet = @import("./echonet.zig");
 
@@ -41,7 +39,6 @@ pub fn main() !void {
     // var pcap_fd = try fs.cwd().createFile("test.pcap", .{});
     // defer pcap_fd.close();
 
-    // var writer = pcapfile.pcap.initWriter(.{ .network = .IPV6 }, pcap_fd.writer());
     // try writer.writeFileHeader();
 
     var port = try SerialPort.open(conf.device.asSlice(), 115_200, allocator);

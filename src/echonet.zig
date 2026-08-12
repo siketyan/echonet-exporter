@@ -225,10 +225,12 @@ pub const Frame = union(enum) {
         const ehd2 = try reader.readByte();
         switch (ehd2) {
             0x81 => {
+                self.* = .{ .format1 = undefined };
                 self.format1.tid = try reader.readInt(u16, .big);
                 try self.format1.edata.readAlloc(reader, alloc);
             },
             0x82 => {
+                self.* = .{ .format2 = undefined };
                 self.format2.tid = try reader.readInt(u16, .big);
                 _ = try reader.readAll(self.format2.edata);
             },

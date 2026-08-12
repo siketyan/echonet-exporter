@@ -24,11 +24,11 @@ pub const String = struct {
     }
 };
 
-fn parseString(value: yaml.Value, allocator: mem.Allocator) !String {
-    return try String.fromSlice(allocator, try value.asString());
+fn parseString(value: yaml.Yaml.Value, allocator: mem.Allocator) !String {
+    return try String.fromSlice(allocator, try value.asScalar());
 }
 
-fn parseArrayList(comptime T: type, value: yaml.Value, allocator: mem.Allocator) !std.ArrayList(T) {
+fn parseArrayList(comptime T: type, value: yaml.Yaml.Value, allocator: mem.Allocator) !std.ArrayList(T) {
     const value_list = try value.asList();
     var list = try std.ArrayList(T).initCapacity(allocator, value_list.len);
     for (value_list) |v| {
@@ -40,7 +40,7 @@ fn parseArrayList(comptime T: type, value: yaml.Value, allocator: mem.Allocator)
     return list;
 }
 
-fn parseOptional(comptime T: type, value: ?yaml.Value, allocator: mem.Allocator) !?T {
+fn parseOptional(comptime T: type, value: ?yaml.Yaml.Value, allocator: mem.Allocator) !?T {
     if (value) |v| {
         var out: T = undefined;
         try out.parseYamlAlloc(v, allocator);
@@ -50,8 +50,8 @@ fn parseOptional(comptime T: type, value: ?yaml.Value, allocator: mem.Allocator)
     }
 }
 
-fn parseEnum(comptime T: type, value: yaml.Value) !T {
-    const str = try value.asString();
+fn parseEnum(comptime T: type, value: yaml.Yaml.Value) !T {
+    const str = try value.asScalar();
     return inline for (@typeInfo(Type).@"enum".fields) |f| {
         if (mem.eql(u8, f.name, str)) {
             break @enumFromInt(f.value);
@@ -76,7 +76,7 @@ pub const Credentials = struct {
         self.pwd.deinit();
     }
 
-    pub fn parseYamlAlloc(self: *Credentials, value: yaml.Value, allocator: mem.Allocator) !void {
+    pub fn parseYamlAlloc(self: *Credentials, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = try value.asMap();
 
         self.rbid = try parseString(map.get("rbid").?, allocator);
@@ -89,12 +89,12 @@ pub const Target = struct {
     class_code: u8,
     instance_code: u8,
 
-    pub fn parseYaml(self: *Target, value: yaml.Value) !void {
+    pub fn parseYaml(self: *Target, value: yaml.Yaml.Value) !void {
         const map = try value.asMap();
 
-        self.class_group_code = @intCast(try map.get("class_group_code").?.asInt());
-        self.class_code = @intCast(try map.get("class_code").?.asInt());
-        self.instance_code = @intCast(try map.get("instance_code").?.asInt());
+        self.class_group_code = try std.fmt.parseInt(u8, try map.get("class_group_code").?.asScalar(), 0);
+        self.class_code = try std.fmt.parseInt(u8, try map.get("class_code").?.asScalar(), 0);
+        self.instance_code = try std.fmt.parseInt(u8, try map.get("instance_code").?.asScalar(), 0);
     }
 };
 
@@ -116,11 +116,11 @@ pub const Measure = struct {
         if (self.help) |s| s.deinit();
     }
 
-    pub fn parseYamlAlloc(self: *Measure, value: yaml.Value, allocator: mem.Allocator) !void {
+    pub fn parseYamlAlloc(self: *Measure, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = try value.asMap();
 
-        self.name = try String.fromSlice(allocator, try map.get("name").?.asString());
-        self.help = if (map.get("help")) |v| try String.fromSlice(allocator, try v.asString()) else null;
+        self.name = try String.fromSlice(allocator, try map.get("name").?.asScalar());
+        self.help = if (map.get("help")) |v| try String.fromSlice(allocator, try v.asScalar()) else null;
     }
 };
 
@@ -132,7 +132,7 @@ pub const Layout = struct {
         self.name.deinit();
     }
 
-    pub fn parseYamlAlloc(self: *Layout, value: yaml.Value, allocator: mem.Allocator) !void {
+    pub fn parseYamlAlloc(self: *Layout, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = try value.asMap();
 
         self.type = try parseEnum(Type, map.get("type").?);
@@ -148,10 +148,10 @@ pub const Property = struct {
         deinitAll(Layout, self.layout);
     }
 
-    pub fn parseYamlAlloc(self: *Property, value: yaml.Value, allocator: mem.Allocator) !void {
+    pub fn parseYamlAlloc(self: *Property, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = try value.asMap();
 
-        self.epc = @intCast(try map.get("epc").?.asInt());
+        self.epc = try std.fmt.parseInt(u8, try map.get("epc").?.asScalar(), 0);
         self.layout = try parseArrayList(Layout, map.get("layout").?, allocator);
     }
 };
@@ -171,16 +171,16 @@ pub const Config = struct {
         deinitAll(Property, self.properties);
     }
 
-    pub fn parseYamlAlloc(self: *Config, value: yaml.Value, allocator: mem.Allocator) !void {
+    pub fn parseYamlAlloc(self: *Config, value: yaml.Yaml.Value, allocator: mem.Allocator) !void {
         const map = try value.asMap();
 
-        var addr = mem.splitSequence(u8, try map.get("address").?.asString(), ":");
+        var addr = mem.splitSequence(u8, try map.get("address").?.asScalar(), ":");
         self.address = try std.net.Address.parseIp(
             addr.next().?,
             try std.fmt.parseUnsigned(u16, addr.next().?, 10),
         );
 
-        self.device = try String.fromSlice(allocator, try map.get("device").?.asString());
+        self.device = try String.fromSlice(allocator, try map.get("device").?.asScalar());
         self.credentials = try parseOptional(Credentials, map.get("credentials"), allocator);
         try self.target.parseYaml(map.get("target").?);
         self.measures = try parseArrayList(Measure, map.get("measures").?, allocator);
@@ -188,8 +188,9 @@ pub const Config = struct {
     }
 
     pub fn loadYamlAlloc(buf: []const u8, alloc: mem.Allocator) !Config {
-        var raw = try yaml.Yaml.load(alloc, buf);
-        defer raw.deinit();
+        var raw: yaml.Yaml = .{ .source = buf };
+        defer raw.deinit(alloc);
+        try raw.load(alloc);
 
         var config: Config = undefined;
         try config.parseYamlAlloc(raw.docs.getLast(), alloc);
