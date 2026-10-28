@@ -69,11 +69,7 @@ fn parseInt(comptime T: type, value: yaml.Yaml.Value) !T {
 
 fn parseEnum(comptime T: type, value: yaml.Yaml.Value) !T {
     const str = value.asScalar() orelse return error.TypeMismatch;
-    return inline for (@typeInfo(T).@"enum".fields) |f| {
-        if (mem.eql(u8, f.name, str)) {
-            break @enumFromInt(f.value);
-        }
-    } else error.InvalidEnumValue;
+    return std.meta.stringToEnum(T, str) orelse error.InvalidEnumValue;
 }
 
 fn deinitAll(comptime T: type, list: ArrayList(T)) void {

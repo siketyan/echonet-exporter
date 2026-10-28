@@ -277,19 +277,16 @@ pub fn BP35C0Raw(comptime Port: type) type {
                     try self.port.readAll(&buf);
                     _ = try self.readCRLF();
 
-                    inline for (@typeInfo(ErrorCode).@"enum".fields) |f| {
-                        if (mem.eql(u8, &buf, f.name)) {
-                            const code: ErrorCode = @enumFromInt(f.value);
-                            log.debug("< FAIL {s}", .{f.name});
+                    if (std.meta.stringToEnum(ErrorCode, &buf)) |code| {
+                        log.debug("< FAIL {s}", .{&buf});
 
-                            switch (code) {
-                                .ER04 => return error.CommandNotSupported,
-                                .ER05 => return error.InvalidArgument,
-                                .ER06 => return error.InvalidFormatOrOutOfRange,
-                                .ER09 => return error.UartInputError,
-                                .ER10 => return error.ExecutionFailed,
-                                else => {},
-                            }
+                        switch (code) {
+                            .ER04 => return error.CommandNotSupported,
+                            .ER05 => return error.InvalidArgument,
+                            .ER06 => return error.InvalidFormatOrOutOfRange,
+                            .ER09 => return error.UartInputError,
+                            .ER10 => return error.ExecutionFailed,
+                            else => {},
                         }
                     }
 
@@ -354,10 +351,10 @@ pub fn BP35C0Raw(comptime Port: type) type {
 
         pub fn skscan(self: *Self, mode: ScanMode, channel_mask: u32, duration: u8, side: Side) !void {
             try self.writeLine("SKSCAN {X} {X:0>8} {X} {X}", .{
-                @intFromEnum(mode),
+                @backingInt(mode),
                 channel_mask,
                 duration,
-                @intFromEnum(side),
+                @backingInt(side),
             });
 
             return try self.readResult();
@@ -391,8 +388,8 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 handle,
                 fmtIp6Addr(ip_addr),
                 port,
-                @intFromEnum(sec),
-                @intFromEnum(side),
+                @backingInt(sec),
+                @backingInt(side),
                 data.len,
             });
             try self.port.writeAll(data);
@@ -496,7 +493,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 .lport = lport,
                 .sender_lla = sender_lla,
                 .secured = secured != 0,
-                .side = @enumFromInt(side),
+                .side = @fromBackingInt(@intCast(side)),
                 .data = data,
             };
         }
@@ -552,7 +549,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
                 .pan_id = pan_id,
                 .addr = addr,
                 .lqi = lqi,
-                .side = @enumFromInt(side),
+                .side = @fromBackingInt(@intCast(side)),
                 .pair_id = pair_id[0..8].*,
             };
         }
@@ -573,7 +570,7 @@ pub fn BP35C0Raw(comptime Port: type) type {
             return .{
                 .num = num,
                 .sender = (try Io.net.Ip6Address.parse(sender, 0)).bytes,
-                .side = @enumFromInt(side),
+                .side = @fromBackingInt(@intCast(side)),
                 .param = param,
             };
         }

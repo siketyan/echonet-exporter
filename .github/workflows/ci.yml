@@ -26,7 +26,7 @@ jobs:
       - name: Set up Zig
         uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       # Scoped to the sources, as a bare `.` would walk the fetched dependencies too.
       - name: Check formatting
@@ -66,7 +66,7 @@ jobs:
       - name: Set up Zig
         uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Build
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe

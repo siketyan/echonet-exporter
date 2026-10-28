@@ -349,11 +349,12 @@ test "handleRequest - responds with the metrics of every configured property" {
 /// Builds a config whose single property carries one value of every type.
 fn testingTypesConfig(allocator: mem.Allocator) !config.Config {
     const Layouts = std.array_list.Managed(config.Layout);
-    var layout = try Layouts.initCapacity(allocator, @typeInfo(config.Type).@"enum".fields.len);
-    inline for (@typeInfo(config.Type).@"enum".fields) |f| {
+    const names = @typeInfo(config.Type).@"enum".field_names;
+    var layout = try Layouts.initCapacity(allocator, names.len);
+    inline for (names) |name| {
         layout.appendAssumeCapacity(.{
-            .type = @enumFromInt(f.value),
-            .name = try config.String.fromSlice(allocator, f.name),
+            .type = @field(config.Type, name),
+            .name = try config.String.fromSlice(allocator, name),
         });
     }
 
