@@ -738,6 +738,17 @@ pub fn BP35C0(comptime Port: type) type {
             self.is_connected = true;
         }
 
+        /// Terminate the session and join the coordinator again from scratch.
+        /// The coordinator may drop the session without any event telling so,
+        /// so the device would never answer again unless reconnected.
+        pub fn reconnect(self: *Self) !void {
+            // There may be no session left to terminate, and nothing to do about it.
+            self.raw.skterm() catch |err| log.debug("SKTERM failed: {}", .{err});
+            self.is_connected = false;
+
+            try self.connect();
+        }
+
         pub fn recv(self: *Self, timeout: i32) ![]u8 {
             while (self.is_connected) {
                 const event = try self.raw.pollEvent(timeout) orelse return error.TimedOut;
@@ -1468,6 +1479,35 @@ test "connect - reports a failed join" {
 
     try t.expectError(error.ConnectionFailed, bp35c0.connect());
     try t.expect(!bp35c0.is_connected);
+}
+
+test "reconnect - joins again even if there is no session to terminate" {
+    const t = std.testing;
+
+    var port = try TestingPort.init(t.allocator);
+    defer port.deinit();
+
+    var bp35c0 = testingBP35C0(&port, t.allocator);
+    defer bp35c0.raw.event_queue.deinit(t.allocator);
+    bp35c0.is_connected = true;
+
+    port.feed("FAIL ER10" ++ CRLF); // SKTERM without a session
+    port.feed("OK" ++ CRLF); // SKSETRBID
+    port.feed("OK" ++ CRLF); // SKSETPWD
+    port.feed("OK" ++ CRLF); // SKSCAN
+    port.feed(eventResponse("20"));
+    port.feed(epandesc_response);
+    port.feed(eventResponse("22"));
+    port.feed(remote_ip6_addr ++ CRLF); // SKLL64
+    port.feed("OK" ++ CRLF); // SKSREG S02
+    port.feed("OK" ++ CRLF); // SKSREG S03
+    port.feed("OK" ++ CRLF); // SKJOIN
+    port.feed(eventResponse("25"));
+
+    try bp35c0.reconnect();
+
+    try t.expect(bp35c0.is_connected);
+    try t.expect(mem.startsWith(u8, port.written(), "SKTERM" ++ CRLF ++ "SKSETRBID "));
 }
 
 /// The link-local address of a node that is not the coordinator.
