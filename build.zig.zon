@@ -2,18 +2,18 @@
     .name = .echonet_exporter,
     .fingerprint = 0xbbcd7ea44d9cba42,
     .version = "0.0.1",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
 
     .paths = .{""},
 
     .dependencies = .{
         .serial = .{
-            .url = "https://github.com/ZigEmbeddedGroup/serial/archive/4c4caabad4a78e699034a95ba7145bf07cdd8e78.tar.gz",
-            .hash = "serial-0.0.1-PoeRzPq5AAAHeo07adkaBjANT4JUaOpNWcnxQGqjxcQY",
+            .url = "https://github.com/ZigEmbeddedGroup/serial/archive/25b58d0ea62f7bfc33e6c147c1c02193a50c65fb.tar.gz",
+            .hash = "serial-0.0.1-PoeRzD66AACCQUHzsIssi6bOcEtnQFPebT6WLvno0I_p",
         },
         .@"zig-yaml" = .{
-            .url = "https://github.com/Stuff7/zig-yaml/archive/cf7a1c178518f408cf606cdc6a76ea01a5d66798.tar.gz",
-            .hash = "zig_yaml-0.3.0-C1161gmsAgBMXfMGSbvs1jaocmD2KVCEZRPKBSO0x1Hc",
+            .url = "https://github.com/siketyan/zig-yaml/archive/3613ef28e92455c76358958174c9204ea9fbb8f4.tar.gz",
+            .hash = "zig_yaml-0.3.0-C1161muYAgAoM158nWby6A6pqeFpBdye-7wh8qtq0r2g",
         },
     },
 }
