@@ -18,13 +18,14 @@ pub fn Controller(comptime Transport: type) type {
         /// Sends the request and waits for the response of the same transaction.
         /// The request is retransmitted until the configured attempts are exhausted,
         /// as the underlying transport is UDP and gives no delivery guarantee.
-        /// Returns null if no response arrived within any of the attempts.
+        /// Returns null if no response arrived within any of the attempts, after
+        /// reconnecting the transport for the next transaction.
         pub fn handle(self: *const Self, req: echonet.Frame) !?echonet.Frame {
             const buf = try req.toBytesAlloc(self.allocator);
             defer self.allocator.free(buf);
 
             var attempt: u8 = 0;
-            return while (attempt < self.retry.max_attempts) : (attempt += 1) {
+            while (attempt < self.retry.max_attempts) : (attempt += 1) {
                 if (attempt > 0) {
                     log.warn("No response for the transaction {X:0>4}, retransmitting ({d}/{d})", .{
                         req.getTID(),
@@ -37,8 +38,15 @@ pub fn Controller(comptime Transport: type) type {
 
                 // A response to an earlier attempt is accepted as well, since every
                 // attempt of a transaction carries the same TID.
-                if (try self.receive(req.getTID())) |resp| break resp;
-            } else null;
+                if (try self.receive(req.getTID())) |resp| return resp;
+            }
+
+            // The device may have lost the session silently, in which case it
+            // accepts every request and never answers until reconnected.
+            log.warn("No response for the transaction {X:0>4}, reconnecting", .{req.getTID()});
+            try self.transport.reconnect();
+
+            return null;
         }
 
         /// Waits for the response of the transaction, ignoring the frames of another one.
@@ -98,9 +106,15 @@ const TestingTransport = struct {
     sent: ?[]u8 = null,
     /// The last time-out passed to recv().
     timeout: ?i32 = null,
+    /// Number of reconnect() calls made so far.
+    reconnect_count: usize = 0,
 
     fn deinit(self: *Self) void {
         if (self.sent) |sent| self.allocator.free(sent);
+    }
+
+    fn reconnect(self: *Self) !void {
+        self.reconnect_count += 1;
     }
 
     fn send(self: *Self, data: []const u8) !void {
@@ -234,6 +248,7 @@ test "handle - retransmits the request until the response arrives" {
 
     try t.expectEqual(2, transport.send_count);
     try t.expectEqual(1000, transport.timeout);
+    try t.expectEqual(0, transport.reconnect_count);
 
     // The retransmitted request must be the same one, TID included.
     try t.expectEqualStrings(request_bytes, transport.sent.?);
@@ -265,6 +280,9 @@ test "handle - returns null once the attempts are exhausted" {
 
     try t.expect(try controller.handle(req) == null);
     try t.expectEqual(3, transport.send_count);
+
+    // The device is assumed to have lost the session.
+    try t.expectEqual(1, transport.reconnect_count);
 }
 
 test "handle - sends the request once when the retries are disabled" {
