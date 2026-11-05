@@ -15,6 +15,10 @@ pub const SerialPort = struct {
     io: Io,
     fifo: std.Deque(u8),
     allocator: mem.Allocator,
+    /// How long a read waits for the device before giving up, in milliseconds.
+    /// It has to outlast the quiet spells of a scan and a join, which take tens
+    /// of seconds, but a device that stopped talking must not block forever.
+    read_timeout_ms: i32 = 60_000,
 
     fn init(fd: Io.File, io: Io, allocator: mem.Allocator) Self {
         return Self{
@@ -73,7 +77,7 @@ pub const SerialPort = struct {
         };
     }
 
-    pub const ReadError = Io.File.ReadStreamingError;
+    pub const ReadError = Io.File.ReadStreamingError || PollError || error{TimedOut};
 
     pub fn read(self: *Self, buf: []u8) ReadError!usize {
         var fifo_len: usize = 0;
@@ -84,6 +88,14 @@ pub const SerialPort = struct {
             log.debug("Read {d} bytes from the FIFO buffer and the buffer is already filled", .{fifo_len});
 
             return fifo_len;
+        }
+
+        // Wait for the device only when there is nothing to return yet.
+        if (!try self.poll(if (fifo_len > 0) 0 else self.read_timeout_ms)) {
+            if (fifo_len > 0) return fifo_len;
+
+            log.warn("No data from the port within {d} ms", .{self.read_timeout_ms});
+            return error.TimedOut;
         }
 
         const raw_len = self.fd.readStreaming(self.io, &.{buf[fifo_len..]}) catch |err| switch (err) {
@@ -197,4 +209,25 @@ test "poll - reports whether the next data is available" {
     try write_fd.writeStreamingAll(t.io, "Hello");
 
     try t.expect(try port.poll(0));
+}
+
+test "read - gives up on a port that stays silent" {
+    const t = std.testing;
+
+    const fds = try std.Io.Threaded.pipe2(.{});
+
+    var write_fd: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+    defer write_fd.close(t.io);
+
+    var port = SerialPort.init(.{ .handle = fds[0], .flags = .{ .nonblocking = false } }, t.io, t.allocator);
+    defer port.close();
+    port.read_timeout_ms = 10;
+
+    var buf: [4]u8 = undefined;
+    try t.expectError(error.TimedOut, port.read(&buf));
+
+    // What was put back is returned without waiting for the rest.
+    try port.putBack("OK");
+    try t.expectEqual(2, try port.read(&buf));
+    try t.expectEqualStrings("OK", buf[0..2]);
 }
