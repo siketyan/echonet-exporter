@@ -62,28 +62,30 @@ pub fn Server(comptime Controller: type) type {
             var reader = conn.reader(self.io, &self.rx_buf);
             var writer = conn.writer(self.io, &self.tx_buf);
             var http_server = http.Server.init(&reader.interface, &writer.interface);
-            while (true) {
-                var request = http_server.receiveHead() catch return;
 
-                log.info("{s} {s} {s}", .{
-                    @tagName(request.head.version),
-                    @tagName(request.head.method),
-                    request.head.target,
-                });
+            // One request per connection: the server is single-threaded, so waiting
+            // on an idle keep-alive connection, whose peer may be long gone without
+            // a word, would keep every other client out.
+            var request = http_server.receiveHead() catch return;
 
-                try self.handleRequest(&request);
-            }
+            log.info("{s} {s} {s}", .{
+                @tagName(request.head.version),
+                @tagName(request.head.method),
+                request.head.target,
+            });
+
+            try self.handleRequest(&request);
         }
 
         fn handleRequest(self: *Self, request: *http.Server.Request) !void {
             if (!mem.eql(u8, request.head.target, "/metrics")) {
-                try request.respond(&.{}, .{ .status = .not_found });
+                try request.respond(&.{}, .{ .status = .not_found, .keep_alive = false });
                 log.info("404 Not Found", .{});
                 return;
             }
 
             if (request.head.method != .GET) {
-                try request.respond(&.{}, .{ .status = .method_not_allowed });
+                try request.respond(&.{}, .{ .status = .method_not_allowed, .keep_alive = false });
                 log.info("405 Method Not Allowed", .{});
                 return;
             }
@@ -119,7 +121,7 @@ pub fn Server(comptime Controller: type) type {
             const resp = try self.controller.handle(req) orelse {
                 // The controller has already retransmitted the request, so the
                 // device is out of reach for now.
-                try request.respond(&.{}, .{ .status = .gateway_timeout });
+                try request.respond(&.{}, .{ .status = .gateway_timeout, .keep_alive = false });
                 log.info("504 Gateway Timeout", .{});
                 return;
             };
@@ -171,6 +173,7 @@ pub fn Server(comptime Controller: type) type {
             }
 
             try request.respond(body.writer.buffered(), .{
+                .keep_alive = false,
                 .extra_headers = &.{
                     .{ .name = "Content-Type", .value = "text/plain; version=0.0.4" },
                 },
@@ -279,7 +282,8 @@ fn handleTestRequest(
             .content_length = null,
             .transfer_encoding = .none,
             .transfer_compression = .identity,
-            .keep_alive = false,
+            // As Prometheus does, so the responses must close the connection on their own.
+            .keep_alive = true,
         },
         .head_buffer = &.{},
     };
