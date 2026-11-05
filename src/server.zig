@@ -20,8 +20,8 @@ pub fn Server(comptime Controller: type) type {
         conf: config.Config,
         txm: *TransactionManager,
         controller: *const Controller,
-        rx_buf: [2048]u8 = undefined,
-        tx_buf: [2048]u8 = undefined,
+        /// The device takes one transaction at a time, whatever the clients do.
+        device_mutex: Io.Mutex = .init,
 
         pub fn init(
             allocator: mem.Allocator,
@@ -48,24 +48,38 @@ pub fn Server(comptime Controller: type) type {
 
             log.info("HTTP server is ready at {f}", .{addr});
 
+            try self.serve(&server);
+        }
+
+        /// Accepts connections and serves each of them concurrently, so a client
+        /// that stalls cannot keep the others out.
+        fn serve(self: *Self, server: *net.Server) !void {
+            var group: Io.Group = .init;
+            defer group.cancel(self.io);
+
             while (true) {
-                var conn = try server.accept(self.io);
-                defer conn.close(self.io);
+                const conn = try server.accept(self.io);
 
                 log.info("A new connection has been accepted", .{});
 
-                try self.handleConnection(conn);
+                group.concurrent(self.io, handleConnection, .{ self, conn }) catch {
+                    // Out of threads for now, so serve this one in turn.
+                    self.handleConnection(conn);
+                };
             }
         }
 
-        fn handleConnection(self: *Self, conn: net.Stream) !void {
-            var reader = conn.reader(self.io, &self.rx_buf);
-            var writer = conn.writer(self.io, &self.tx_buf);
+        fn handleConnection(self: *Self, conn: net.Stream) void {
+            defer conn.close(self.io);
+
+            var rx_buf: [2048]u8 = undefined;
+            var tx_buf: [2048]u8 = undefined;
+            var reader = conn.reader(self.io, &rx_buf);
+            var writer = conn.writer(self.io, &tx_buf);
             var http_server = http.Server.init(&reader.interface, &writer.interface);
 
-            // One request per connection: the server is single-threaded, so waiting
-            // on an idle keep-alive connection, whose peer may be long gone without
-            // a word, would keep every other client out.
+            // One request per connection, so an idle keep-alive connection, whose
+            // peer may be long gone without a word, does not hold a task forever.
             var request = http_server.receiveHead() catch return;
 
             log.info("{s} {s} {s}", .{
@@ -74,7 +88,18 @@ pub fn Server(comptime Controller: type) type {
                 request.head.target,
             });
 
-            try self.handleRequest(&request);
+            self.handleRequest(&request) catch |err| switch (err) {
+                // The client went away before the response, which says nothing
+                // about the device.
+                error.WriteFailed => log.warn("Failed to send the response", .{}),
+                else => {
+                    // The process ends on an error of the device so that systemd
+                    // starts it over, which is how the device gets reset. A task
+                    // cannot pass its error on, so end the process here.
+                    log.err("Failed to handle the request: {t}", .{err});
+                    std.process.exit(1);
+                },
+            };
         }
 
         fn handleRequest(self: *Self, request: *http.Server.Request) !void {
@@ -118,7 +143,13 @@ pub fn Server(comptime Controller: type) type {
                 },
             };
 
-            const resp = try self.controller.handle(req) orelse {
+            const maybe_resp = resp: {
+                try self.device_mutex.lock(self.io);
+                defer self.device_mutex.unlock(self.io);
+
+                break :resp try self.controller.handle(req);
+            };
+            const resp = maybe_resp orelse {
                 // The controller has already retransmitted the request, so the
                 // device is out of reach for now.
                 try request.respond(&.{}, .{ .status = .gateway_timeout, .keep_alive = false });
@@ -569,4 +600,49 @@ test "handleRequest - responds 504 when the controller reports a timeout" {
     , bytes);
 
     try t.expectEqualStrings("", body);
+}
+
+test "serve - answers a client while another one stays silent" {
+    const t = std.testing;
+
+    const conf = try testingConfig(t.allocator, true);
+    defer conf.deinit();
+
+    const response = try testingResponse(t.allocator, 0xE8, "\x12\x34\x56\x79");
+    defer response.deinit();
+
+    const controller = TestingController{ .response = response };
+
+    var txm = TransactionManager.init();
+    var server = Server(TestingController){
+        .allocator = t.allocator,
+        .io = t.io,
+        .conf = conf,
+        .txm = &txm,
+        .controller = &controller,
+    };
+
+    const any_port = try net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try any_port.listen(t.io, .{});
+    defer listener.deinit(t.io);
+
+    var serving = try t.io.concurrent(Server(TestingController).serve, .{ &server, &listener });
+    defer serving.cancel(t.io) catch {};
+
+    // Accepted first, but never sends a request. A server taking the clients
+    // one by one would wait on it forever, and so would this test.
+    const silent = try listener.socket.address.connect(t.io, .{ .mode = .stream });
+    defer silent.close(t.io);
+
+    const client = try listener.socket.address.connect(t.io, .{ .mode = .stream });
+    defer client.close(t.io);
+
+    var tx_buf: [256]u8 = undefined;
+    var writer = client.writer(t.io, &tx_buf);
+    try writer.interface.writeAll("GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    try writer.interface.flush();
+
+    var rx_buf: [1024]u8 = undefined;
+    var reader = client.reader(t.io, &rx_buf);
+    try t.expectEqualStrings("HTTP/1.1 200 OK\r", try reader.interface.takeDelimiterExclusive('\n'));
 }
